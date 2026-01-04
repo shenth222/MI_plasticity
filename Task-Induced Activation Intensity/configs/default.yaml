@@ -1,0 +1,66 @@
+# 默认配置文件
+
+# 模型配置
+model:
+  path: "/path/to/Llama-3.2-1B"  # 修改为您的本地模型路径
+  dtype: "fp16"  # fp16, bf16, fp32
+  attn_implementation: "eager"  # 强制使用 eager 以捕获 attention probs
+
+# 数据配置
+data:
+  path: "/path/to/commonsense_170k.jsonl"  # 修改为您的数据集路径
+  max_samples: 1024  # 使用的最大样本数
+  max_length: 512    # 最大序列长度
+  
+  # 数据集字段映射（如果您的数据集字段不同，请修改）
+  field_mapping:
+    question: "question"
+    choices_text: "choices.text"
+    choices_label: "choices.label"
+    answer_key: "answerKey"
+
+# Prompt 配置
+prompt:
+  template: |
+    Question: {question}
+    Choices:
+    A. {choice_A}
+    B. {choice_B}
+    C. {choice_C}
+    D. {choice_D}
+    Answer:
+  
+  # Span 提取标记
+  question_marker: "Question:"
+  choices_marker: "Choices:"
+
+# 推理配置
+inference:
+  batch_size: 4
+  device: "cuda:0"  # cuda:0, cuda:1, cpu
+  seed: 42
+
+# 评分配置
+scoring:
+  query_mode: "last_token"  # last_token: 使用最后一个 token 作为 query
+                             # all_tokens: 使用所有非 pad tokens 作为 query
+  
+  norm_mode: "zscore"  # zscore: z-score 归一化
+                       # percentile: 百分位归一化
+  
+  # 组合分数权重
+  lambda_ent: 0.5   # entropy 分数权重
+  lambda_task: 1.0  # task-align 分数权重
+  
+  # Top-k 配置
+  topk_global: 20   # 全局 top-k
+  topk_per_layer: 5 # 每层 top-k
+
+# 输出配置
+output:
+  dir: "outputs/run_001"
+  save_raw: true
+  save_normalized: true
+  save_combined: true
+  save_topk: true
+

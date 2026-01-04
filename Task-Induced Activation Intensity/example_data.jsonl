@@ -1,0 +1,4 @@
+{"question": "What happens when you drop a ball?", "choices": {"text": ["It falls down", "It flies up", "It disappears", "It stays still"], "label": ["A", "B", "C", "D"]}, "answerKey": "A"}
+{"question": "Where do fish live?", "choices": {"text": ["In the ocean", "In the sky", "On the mountain", "In the desert"], "label": ["A", "B", "C", "D"]}, "answerKey": "A"}
+{"question": "What do plants need to grow?", "choices": {"text": ["Sunlight and water", "Only darkness", "Ice and snow", "Nothing at all"], "label": ["A", "B", "C", "D"]}, "answerKey": "A"}
+
