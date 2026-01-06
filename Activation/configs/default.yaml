@@ -1,0 +1,28 @@
+# Model Configuration
+model_path: "/data/models/llama-3.2-1b/"
+dtype: "bf16"  # bf16, fp16, fp32
+device_map: "auto"  # auto, cuda, cpu
+attn_implementation: null  # null, flash_attention_2, sdpa
+
+# Data Configuration
+data_dir: "/data/datasets/arc_challenge/"
+max_samples: 5000  # -1 for all
+batch_size: 4
+max_length: 384
+num_workers: 0
+
+# Prompt Configuration
+template_name: "arc_mcq_v1"
+few_shot: 0  # 0, 1, 2
+
+# Collection Configuration
+token_agg: "last"  # last, all
+
+# Output Configuration
+output_dir: "./outputs"
+save_every: null  # Save intermediate results every N steps (null to disable)
+
+# Experiment Configuration
+seed: 42
+experiment_name: "arc_head_activation"
+
