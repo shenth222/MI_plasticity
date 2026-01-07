@@ -1,14 +1,14 @@
 # Model Configuration
-model_path: "/data/models/llama-3.2-1b/"
+model_path: "/data1/shenth/models/llama/3.2-1b"
 dtype: "bf16"  # bf16, fp16, fp32
-device_map: "auto"  # auto, cuda, cpu
+device_map: "cuda"  # auto, cuda, cpu
 attn_implementation: null  # null, flash_attention_2, sdpa
 
 # Data Configuration
-data_dir: "/data/datasets/arc_challenge/"
+data_dir: "/data1/shenth/datasets/commonsense/origin/arc_c/arc_challenge_train.json"
 max_samples: 5000  # -1 for all
 batch_size: 4
-max_length: 384
+max_length: 256
 num_workers: 0
 
 # Prompt Configuration

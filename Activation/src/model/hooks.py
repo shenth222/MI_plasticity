@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 import numpy as np
 from .metrics import OnlineStats
 from ..utils.logging import get_logger
@@ -11,12 +11,14 @@ logger = get_logger(__name__)
 
 class HookManager:
     """
-    Manages forward hooks to collect attention head activations.
+    精简版 Hook Manager：直接在 o_proj 处捕获 per-head 输出。
     
-    Collects two metrics per head:
-    1. Head Output Norm: L2 norm of each head's output before merging
-    2. Head Residual Contribution Norm: L2 norm of each head's contribution 
-       through the output projection
+    核心思路：
+    1. Head Output: 在 o_proj 的输入处捕获，此时是 reshape 前的 [bs, seq_len, hidden_size]
+       可以直接 view 为 [bs, seq_len, num_heads, head_dim]
+    2. Head Residual Contribution: 对每个 head 的输出，应用 o_proj 权重的对应切片
+    
+    这样避免了重复计算 attention。
     """
     
     def __init__(self, 
@@ -26,29 +28,32 @@ class HookManager:
                  head_dim: int,
                  token_agg: str = "last"):
         """
-        Initialize hook manager.
+        初始化 hook manager。
         
         Args:
-            model: The model to hook
-            num_layers: Number of transformer layers
-            num_heads: Number of attention heads per layer
-            head_dim: Dimension of each head
-            token_agg: Token aggregation strategy ("last" or "all")
+            model: 模型
+            num_layers: Transformer 层数
+            num_heads: 每层的 attention head 数量
+            head_dim: 每个 head 的维度
+            token_agg: Token 聚合策略 ("last" 或 "all")
         """
         self.model = model
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.head_dim = head_dim
+        self.hidden_size = num_heads * head_dim
         self.token_agg = token_agg
         
-        # Initialize online statistics
+        # 初始化在线统计
         self.head_output_norm_stats = OnlineStats((num_layers, num_heads))
         self.head_resid_contrib_norm_stats = OnlineStats((num_layers, num_heads))
         
-        # Storage for intermediate activations
-        self.current_batch_size = None
+        # 存储当前 batch 的 attention mask
         self.current_attention_mask = None
-        self.attention_outputs = {}  # layer_idx -> attention output
+        
+        # 存储当前 batch 的中间结果（保存每个样本的值，而不是批平均）
+        self._batch_head_output_norms = {}  # {layer_idx: [bs, num_heads]}
+        self._batch_head_resid_norms = {}  # {layer_idx: [bs, num_heads]}
         
         # Hook handles
         self.hook_handles = []
@@ -56,408 +61,311 @@ class HookManager:
         # Attach hooks
         self._attach_hooks()
         
-        logger.info(f"HookManager initialized:")
+        logger.info(f"HookManager 初始化完成（精简版）:")
         logger.info(f"  num_layers: {num_layers}")
         logger.info(f"  num_heads: {num_heads}")
         logger.info(f"  head_dim: {head_dim}")
         logger.info(f"  token_agg: {token_agg}")
     
     def _attach_hooks(self) -> None:
-        """Attach forward hooks to all attention layers."""
-        logger.info("Attaching hooks to attention layers...")
+        """在 o_proj 层添加 pre-hook 来捕获 per-head 输出。"""
+        logger.info("Attaching hooks to o_proj layers...")
         
-        # Get attention layers
-        # For LLaMA: model.model.layers[i].self_attn
+        # 获取 attention layers
         if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
             layers = self.model.model.layers
         else:
             raise ValueError("Cannot find transformer layers in model")
         
         for layer_idx, layer in enumerate(layers):
-            if hasattr(layer, "self_attn"):
-                attn_module = layer.self_attn
+            if hasattr(layer, "self_attn") and hasattr(layer.self_attn, "o_proj"):
+                o_proj = layer.self_attn.o_proj
                 
-                # Register hook
-                handle = attn_module.register_forward_hook(
-                    self._make_attention_hook(layer_idx)
+                # 在 o_proj 上添加 pre-hook
+                handle = o_proj.register_forward_pre_hook(
+                    self._make_o_proj_hook(layer_idx, layer.self_attn)
                 )
                 self.hook_handles.append(handle)
             else:
-                logger.warning(f"Layer {layer_idx} has no self_attn attribute")
+                logger.warning(f"Layer {layer_idx} has no self_attn.o_proj")
         
         logger.info(f"Attached {len(self.hook_handles)} hooks")
     
-    def _make_attention_hook(self, layer_idx: int):
+    def _make_o_proj_hook(self, layer_idx: int, attn_module: nn.Module):
         """
-        Create a forward hook for a specific layer.
+        创建 o_proj 的 pre-hook 来捕获输入（即 per-head 输出）。
         
         Args:
-            layer_idx: Layer index
+            layer_idx: 层索引
+            attn_module: Attention 模块
             
         Returns:
-            Hook function
+            Pre-hook 函数
         """
-        def hook(module, input, output):
-            """Forward hook function."""
+        def pre_hook(module, args):
+            """
+            o_proj 的 pre-hook。
+            args[0] 是 o_proj 的输入：[bs, seq_len, hidden_size]
+            这个输入就是 attention 的输出（reshape 后，o_proj 之前）。
+            """
             try:
-                self._process_attention_output(layer_idx, module, input, output)
+                # o_proj 的输入
+                attn_output_before_proj = args[0]  # [bs, seq_len, hidden_size]
+                
+                bs, seq_len, hidden_size = attn_output_before_proj.shape
+                
+                # View 为 per-head: [bs, seq_len, num_heads, head_dim]
+                head_outputs = attn_output_before_proj.view(bs, seq_len, self.num_heads, self.head_dim)
+                
+                # 计算指标
+                self._compute_and_update_metrics(
+                    layer_idx,
+                    head_outputs,
+                    attn_module
+                )
+                
             except Exception as e:
-                logger.error(f"Error in hook for layer {layer_idx}: {e}")
+                logger.error(f"Error in o_proj pre-hook for layer {layer_idx}: {e}")
                 import traceback
                 traceback.print_exc()
         
-        return hook
-    
-    def _process_attention_output(self, 
-                                   layer_idx: int,
-                                   module: nn.Module,
-                                   input: Tuple,
-                                   output: Tuple) -> None:
-        """
-        Process attention output to compute head metrics.
-        
-        In transformers 4.5x, LlamaAttention returns:
-        - output[0]: attention output (after o_proj)
-        - output[1]: attention weights (if output_attentions=True)
-        - output[2]: past_key_value (if use_cache=True)
-        
-        We need to intercept before o_proj to get per-head outputs.
-        """
-        # Get the attention output (after o_proj)
-        attn_output = output[0]  # Shape: [bs, seq_len, hidden_size]
-        
-        bs, seq_len, hidden_size = attn_output.shape
-        
-        # We need to get per-head outputs BEFORE o_proj
-        # Strategy: Hook the internals or reconstruct from states
-        
-        # For LLaMA, we can access intermediate tensors through module attributes
-        # during forward pass. However, this is tricky.
-        
-        # Alternative: We'll hook at a deeper level to capture head outputs
-        # For now, we'll use a workaround: capture from module's internal computation
-        
-        # Let's try to get head outputs from the module's computation
-        head_outputs = self._extract_head_outputs(module, input[0], bs, seq_len)
-        
-        if head_outputs is None:
-            logger.warning(f"Could not extract head outputs for layer {layer_idx}")
-            return
-        
-        # Compute metrics
-        self._compute_and_update_metrics(layer_idx, head_outputs, module)
-    
-    def _extract_head_outputs(self, 
-                             module: nn.Module,
-                             hidden_states: torch.Tensor,
-                             bs: int,
-                             seq_len: int) -> Optional[torch.Tensor]:
-        """
-        Extract per-head outputs from attention module.
-        
-        This is the trickiest part. We need to recompute attention to get per-head outputs.
-        
-        Args:
-            module: Attention module
-            hidden_states: Input hidden states
-            bs: Batch size
-            seq_len: Sequence length
-            
-        Returns:
-            Head outputs with shape [bs, seq_len, num_heads, head_dim]
-        """
-        try:
-            # For LLaMA attention, we need to recompute the attention to extract head outputs
-            # This is simplified - in production, you might want to modify the model code
-            
-            # Get Q, K, V projections
-            if hasattr(module, 'q_proj') and hasattr(module, 'k_proj') and hasattr(module, 'v_proj'):
-                q = module.q_proj(hidden_states)
-                k = module.k_proj(hidden_states)
-                v = module.v_proj(hidden_states)
-                
-                # Reshape to [bs, seq_len, num_heads, head_dim]
-                q = q.view(bs, seq_len, self.num_heads, self.head_dim)
-                k = k.view(bs, seq_len, self.num_heads, self.head_dim)
-                v = v.view(bs, seq_len, self.num_heads, self.head_dim)
-                
-                # Transpose for attention: [bs, num_heads, seq_len, head_dim]
-                q = q.transpose(1, 2)
-                k = k.transpose(1, 2)
-                v = v.transpose(1, 2)
-                
-                # Compute attention scores
-                attn_weights = torch.matmul(q, k.transpose(-2, -1)) / np.sqrt(self.head_dim)
-                
-                # Apply attention mask if available
-                if self.current_attention_mask is not None:
-                    # Expand mask: [bs, 1, 1, seq_len] or [bs, 1, seq_len, seq_len]
-                    mask = self.current_attention_mask
-                    if mask.dim() == 2:  # [bs, seq_len]
-                        # Create causal mask
-                        mask = mask.unsqueeze(1).unsqueeze(2)  # [bs, 1, 1, seq_len]
-                        # For causal attention, we need to mask future tokens
-                        causal_mask = torch.triu(
-                            torch.ones(seq_len, seq_len, device=mask.device, dtype=torch.bool),
-                            diagonal=1
-                        )
-                        mask = mask & (~causal_mask).unsqueeze(0)
-                    
-                    # Apply mask (set masked positions to large negative value)
-                    attn_weights = attn_weights.masked_fill(~mask, float('-inf'))
-                
-                # Softmax
-                attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
-                
-                # Apply attention to values
-                head_outputs = torch.matmul(attn_weights, v)  # [bs, num_heads, seq_len, head_dim]
-                
-                # Transpose back: [bs, seq_len, num_heads, head_dim]
-                head_outputs = head_outputs.transpose(1, 2)
-                
-                return head_outputs
-            
-            else:
-                logger.warning("Cannot find q_proj/k_proj/v_proj in attention module")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error extracting head outputs: {e}")
-            return None
+        return pre_hook
     
     def _compute_and_update_metrics(self,
                                    layer_idx: int,
                                    head_outputs: torch.Tensor,
-                                   module: nn.Module) -> None:
+                                   attn_module: nn.Module) -> None:
         """
-        Compute head metrics and update statistics.
+        计算 head 指标并更新统计。
         
         Args:
-            layer_idx: Layer index
+            layer_idx: 层索引
             head_outputs: Per-head outputs [bs, seq_len, num_heads, head_dim]
-            module: Attention module
+            attn_module: Attention 模块
         """
         bs, seq_len, num_heads, head_dim = head_outputs.shape
         
-        # Get token positions to aggregate
+        # 获取 token 聚合位置
         if self.token_agg == "last":
-            # Get last valid token position for each sample
-            token_positions = self._get_last_token_positions(bs, seq_len)
+            token_positions = self._get_last_token_positions(bs, seq_len, device=head_outputs.device)
         else:  # "all"
-            token_positions = None  # Will aggregate all valid tokens
+            token_positions = None
         
-        # 1. Compute Head Output Norm
+        # 1. 计算 Head Output Norm
         head_output_norms = self._compute_head_output_norm(
             head_outputs, token_positions
-        )  # Shape: [bs, num_heads]
+        )  # [bs, num_heads]
         
-        # 2. Compute Head Residual Contribution Norm
+        # 2. 计算 Head Residual Contribution Norm
         head_resid_contrib_norms = self._compute_head_resid_contrib_norm(
-            head_outputs, module, token_positions
-        )  # Shape: [bs, num_heads]
+            head_outputs, attn_module, token_positions
+        )  # [bs, num_heads]
         
-        # Update statistics (average over batch)
-        # Take mean over batch dimension
-        head_output_norm_mean = head_output_norms.mean(dim=0)  # [num_heads]
-        head_resid_contrib_norm_mean = head_resid_contrib_norms.mean(dim=0)  # [num_heads]
-        
-        # Update online stats (for this layer)
-        layer_head_output_norm = np.zeros((self.num_layers, num_heads))
-        layer_head_output_norm[layer_idx, :] = head_output_norm_mean.cpu().numpy()
-        
-        layer_head_resid_norm = np.zeros((self.num_layers, num_heads))
-        layer_head_resid_norm[layer_idx, :] = head_resid_contrib_norm_mean.cpu().numpy()
-        
-        # Note: We update layer by layer, so we need a different approach
-        # Store and update after all layers
-        
-        # Alternative: Update per-layer statistics separately
-        # For simplicity, we'll store batch-level results and update once per forward pass
-        
-        if not hasattr(self, '_batch_head_output_norms'):
-            self._batch_head_output_norms = {}
-            self._batch_head_resid_norms = {}
-        
-        self._batch_head_output_norms[layer_idx] = head_output_norm_mean.cpu().numpy()
-        self._batch_head_resid_norms[layer_idx] = head_resid_contrib_norm_mean.cpu().numpy()
+        # 存储到 batch 缓存（保存每个样本的值，不求平均）
+        self._batch_head_output_norms[layer_idx] = head_output_norms.cpu().numpy()  # [bs, num_heads]
+        self._batch_head_resid_norms[layer_idx] = head_resid_contrib_norms.cpu().numpy()  # [bs, num_heads]
     
-    def _get_last_token_positions(self, bs: int, seq_len: int) -> torch.Tensor:
+    def _get_last_token_positions(self, bs: int, seq_len: int, device: torch.device = None) -> torch.Tensor:
         """
-        Get the last valid token position for each sample in batch.
+        获取每个样本的最后一个有效 token 位置（非 padding）。
         
         Args:
             bs: Batch size
             seq_len: Sequence length
+            device: 目标设备（如果为 None，则在 CPU 上）
             
         Returns:
-            Tensor of shape [bs] with last token positions
+            形状 [bs] 的 tensor
         """
-        if self.current_attention_mask is None:
-            # No mask, last position is seq_len - 1 for all
-            return torch.full((bs,), seq_len - 1, dtype=torch.long)
-        
-        # Find last non-padding token for each sample
-        mask = self.current_attention_mask  # [bs, seq_len]
-        last_positions = mask.sum(dim=1) - 1  # [bs]
-        return last_positions.long()
+        if self.current_attention_mask is not None:
+            # 使用 attention_mask 找到每个样本最后一个非 padding token
+            # attention_mask: [bs, seq_len]，1 表示有效 token，0 表示 padding
+            mask = self.current_attention_mask.to(device)
+            # 对每个样本，找到最后一个 1 的位置
+            # 方法：cumsum 后找到最大值的位置
+            last_positions = mask.sum(dim=1) - 1  # [bs]
+            # 确保至少为 0（处理全 0 mask 的边界情况）
+            last_positions = torch.clamp(last_positions, min=0)
+            return last_positions.long()
+        else:
+            # 如果没有 mask，回退到使用最后一个位置
+            logger.warning("attention_mask 未设置，使用 seq_len-1 作为最后 token 位置")
+            return torch.full((bs,), seq_len - 1, dtype=torch.long, device=device)
     
     def _compute_head_output_norm(self,
                                   head_outputs: torch.Tensor,
                                   token_positions: Optional[torch.Tensor]) -> torch.Tensor:
         """
-        Compute L2 norm of each head's output.
+        计算每个 head 输出的 L2 范数。
         
         Args:
             head_outputs: [bs, seq_len, num_heads, head_dim]
-            token_positions: [bs] or None (for "all" aggregation)
+            token_positions: [bs] 或 None
             
         Returns:
-            Head output norms [bs, num_heads]
+            [bs, num_heads]
         """
         bs, seq_len, num_heads, head_dim = head_outputs.shape
         
         if token_positions is not None:
-            # "last" aggregation: take norm at specific positions
-            # Gather outputs at token_positions
-            indices = token_positions.unsqueeze(1).unsqueeze(2).unsqueeze(3)  # [bs, 1, 1, 1]
-            indices = indices.expand(bs, 1, num_heads, head_dim)  # [bs, 1, num_heads, head_dim]
-            selected_outputs = torch.gather(head_outputs, 1, indices).squeeze(1)  # [bs, num_heads, head_dim]
-            
-            # Compute L2 norm over head_dim
-            norms = torch.norm(selected_outputs, p=2, dim=2)  # [bs, num_heads]
+            # "last" 聚合
+            indices = token_positions.view(bs, 1, 1, 1).expand(bs, 1, num_heads, head_dim)
+            selected = torch.gather(head_outputs, 1, indices).squeeze(1)  # [bs, num_heads, head_dim]
+            norms = torch.norm(selected, p=2, dim=2)  # [bs, num_heads]
         else:
-            # "all" aggregation: average norm over all valid tokens
-            # Apply mask if available
+            # "all" 聚合 - 只对有效 token 求平均
+            norms_per_token = torch.norm(head_outputs, p=2, dim=3)  # [bs, seq_len, num_heads]
+            
             if self.current_attention_mask is not None:
-                mask = self.current_attention_mask.unsqueeze(2).unsqueeze(3)  # [bs, seq_len, 1, 1]
-                masked_outputs = head_outputs * mask
+                # 使用 mask 过滤 padding token
+                mask = self.current_attention_mask.to(head_outputs.device)  # [bs, seq_len]
+                mask = mask.unsqueeze(2)  # [bs, seq_len, 1]
                 
-                # Compute norm for each token
-                norms_per_token = torch.norm(masked_outputs, p=2, dim=3)  # [bs, seq_len, num_heads]
+                # 计算加权平均：sum(norms * mask) / sum(mask)
+                masked_norms = norms_per_token * mask  # [bs, seq_len, num_heads]
+                sum_norms = masked_norms.sum(dim=1)  # [bs, num_heads]
+                count = mask.sum(dim=1)  # [bs, 1]
                 
-                # Average over valid tokens
-                num_valid_tokens = mask.sum(dim=1).squeeze(-1).squeeze(-1)  # [bs]
-                norms = norms_per_token.sum(dim=1) / num_valid_tokens.unsqueeze(1)  # [bs, num_heads]
+                # 避免除以 0
+                count = torch.clamp(count, min=1)
+                norms = sum_norms / count  # [bs, num_heads]
             else:
-                # No mask, average over all tokens
-                norms_per_token = torch.norm(head_outputs, p=2, dim=3)  # [bs, seq_len, num_heads]
+                # 如果没有 mask，回退到所有 token 的平均
+                logger.warning("attention_mask 未设置，使用所有 token 进行聚合")
                 norms = norms_per_token.mean(dim=1)  # [bs, num_heads]
         
         return norms
     
     def _compute_head_resid_contrib_norm(self,
                                          head_outputs: torch.Tensor,
-                                         module: nn.Module,
+                                         attn_module: nn.Module,
                                          token_positions: Optional[torch.Tensor]) -> torch.Tensor:
         """
-        Compute L2 norm of each head's contribution through o_proj.
+        计算每个 head 经过 o_proj 后贡献的 L2 范数。
+        
+        方法：对每个 head，用 o_proj 权重的对应列切片计算贡献。
         
         Args:
             head_outputs: [bs, seq_len, num_heads, head_dim]
-            module: Attention module (contains o_proj)
-            token_positions: [bs] or None
+            attn_module: Attention 模块
+            token_positions: [bs] 或 None
             
         Returns:
-            Head residual contribution norms [bs, num_heads]
+            [bs, num_heads]
         """
         bs, seq_len, num_heads, head_dim = head_outputs.shape
-        hidden_size = num_heads * head_dim
         
-        # Get o_proj weight: [hidden_size, hidden_size]
-        if not hasattr(module, 'o_proj'):
-            logger.warning("No o_proj found in attention module")
+        if not hasattr(attn_module, 'o_proj'):
+            logger.warning("No o_proj found")
             return torch.zeros(bs, num_heads, device=head_outputs.device)
         
-        o_proj_weight = module.o_proj.weight  # [hidden_size, hidden_size]
+        # o_proj 权重: [hidden_size, hidden_size]
+        o_proj_weight = attn_module.o_proj.weight
         
         if token_positions is not None:
-            # "last" aggregation
-            indices = token_positions.unsqueeze(1).unsqueeze(2).unsqueeze(3)
-            indices = indices.expand(bs, 1, num_heads, head_dim)
-            selected_outputs = torch.gather(head_outputs, 1, indices).squeeze(1)  # [bs, num_heads, head_dim]
+            # "last" 聚合
+            indices = token_positions.view(bs, 1, 1, 1).expand(bs, 1, num_heads, head_dim)
+            selected = torch.gather(head_outputs, 1, indices).squeeze(1)  # [bs, num_heads, head_dim]
             
-            # Compute contribution for each head
+            # 批量计算所有 head 的贡献
             norms = []
             for h in range(num_heads):
-                head_output = selected_outputs[:, h, :]  # [bs, head_dim]
-                
-                # Get o_proj slice for this head: columns [h*head_dim : (h+1)*head_dim]
+                head_out = selected[:, h, :]  # [bs, head_dim]
+                # o_proj 对应列切片: [:, h*head_dim:(h+1)*head_dim]
                 o_proj_slice = o_proj_weight[:, h*head_dim:(h+1)*head_dim]  # [hidden_size, head_dim]
-                
-                # Compute contribution: head_output @ o_proj_slice^T
-                contribution = torch.matmul(head_output, o_proj_slice.T)  # [bs, hidden_size]
-                
-                # L2 norm
-                norm = torch.norm(contribution, p=2, dim=1)  # [bs]
+                # 贡献: head_out @ o_proj_slice^T
+                contrib = torch.matmul(head_out, o_proj_slice.T)  # [bs, hidden_size]
+                norm = torch.norm(contrib, p=2, dim=1)  # [bs]
                 norms.append(norm)
             
             norms = torch.stack(norms, dim=1)  # [bs, num_heads]
         else:
-            # "all" aggregation: average over valid tokens
-            # This is expensive, so we'll compute efficiently
-            
-            # Reshape head_outputs: [bs, seq_len, num_heads, head_dim]
-            # -> [bs*seq_len, num_heads, head_dim]
+            # "all" 聚合 - 只对有效 token 求平均
             head_outputs_flat = head_outputs.view(bs * seq_len, num_heads, head_dim)
             
-            # Compute contribution for each head
             norms_per_token = []
             for h in range(num_heads):
-                head_output = head_outputs_flat[:, h, :]  # [bs*seq_len, head_dim]
+                head_out = head_outputs_flat[:, h, :]  # [bs*seq_len, head_dim]
                 o_proj_slice = o_proj_weight[:, h*head_dim:(h+1)*head_dim]
-                contribution = torch.matmul(head_output, o_proj_slice.T)  # [bs*seq_len, hidden_size]
-                norm = torch.norm(contribution, p=2, dim=1)  # [bs*seq_len]
+                contrib = torch.matmul(head_out, o_proj_slice.T)
+                norm = torch.norm(contrib, p=2, dim=1)
                 norms_per_token.append(norm)
             
-            norms_per_token = torch.stack(norms_per_token, dim=1)  # [bs*seq_len, num_heads]
-            norms_per_token = norms_per_token.view(bs, seq_len, num_heads)  # [bs, seq_len, num_heads]
+            norms_per_token = torch.stack(norms_per_token, dim=1).view(bs, seq_len, num_heads)
             
-            # Average over valid tokens
             if self.current_attention_mask is not None:
-                mask = self.current_attention_mask.unsqueeze(2)  # [bs, seq_len, 1]
-                masked_norms = norms_per_token * mask
-                num_valid = mask.sum(dim=1)  # [bs, 1]
-                norms = masked_norms.sum(dim=1) / num_valid  # [bs, num_heads]
+                # 使用 mask 过滤 padding token
+                mask = self.current_attention_mask.to(head_outputs.device)  # [bs, seq_len]
+                mask = mask.unsqueeze(2)  # [bs, seq_len, 1]
+                
+                # 计算加权平均
+                masked_norms = norms_per_token * mask  # [bs, seq_len, num_heads]
+                sum_norms = masked_norms.sum(dim=1)  # [bs, num_heads]
+                count = mask.sum(dim=1)  # [bs, 1]
+                
+                # 避免除以 0
+                count = torch.clamp(count, min=1)
+                norms = sum_norms / count  # [bs, num_heads]
             else:
+                # 如果没有 mask，回退到所有 token 的平均
+                logger.warning("attention_mask 未设置，使用所有 token 进行聚合")
                 norms = norms_per_token.mean(dim=1)  # [bs, num_heads]
         
         return norms
     
     def set_attention_mask(self, attention_mask: torch.Tensor) -> None:
-        """Set current attention mask for the forward pass."""
+        """设置当前 forward pass 的 attention mask。"""
         self.current_attention_mask = attention_mask
     
     def finalize_batch(self) -> None:
         """
-        Finalize metrics for the current batch and update online statistics.
-        Call this after each forward pass.
+        完成当前 batch 的指标计算并更新在线统计。
+        在每次 forward pass 后调用。
         """
-        if not hasattr(self, '_batch_head_output_norms'):
+        if not self._batch_head_output_norms:
+            logger.warning("finalize_batch 被调用但没有数据")
             return
         
-        # Aggregate metrics across layers
-        head_output_norms = np.zeros((self.num_layers, self.num_heads))
-        head_resid_norms = np.zeros((self.num_layers, self.num_heads))
-        
+        # 检查缺失的层
+        missing_layers = []
         for layer_idx in range(self.num_layers):
-            if layer_idx in self._batch_head_output_norms:
-                head_output_norms[layer_idx, :] = self._batch_head_output_norms[layer_idx]
-                head_resid_norms[layer_idx, :] = self._batch_head_resid_norms[layer_idx]
+            if layer_idx not in self._batch_head_output_norms:
+                missing_layers.append(layer_idx)
         
-        # Update online statistics
-        self.head_output_norm_stats.update(head_output_norms)
-        self.head_resid_contrib_norm_stats.update(head_resid_norms)
+        if missing_layers:
+            logger.warning(f"以下层没有收集到数据: {missing_layers}")
         
-        # Clear batch storage
+        # 获取 batch size（从第一个有数据的层推断）
+        first_layer = next(iter(self._batch_head_output_norms.keys()))
+        batch_size = self._batch_head_output_norms[first_layer].shape[0]
+        
+        # 对每个样本更新统计（使用样本级加权）
+        for sample_idx in range(batch_size):
+            # 为当前样本聚合所有层的指标
+            sample_head_output_norms = np.zeros((self.num_layers, self.num_heads))
+            sample_head_resid_norms = np.zeros((self.num_layers, self.num_heads))
+            
+            for layer_idx in range(self.num_layers):
+                if layer_idx in self._batch_head_output_norms:
+                    sample_head_output_norms[layer_idx, :] = self._batch_head_output_norms[layer_idx][sample_idx, :]
+                    sample_head_resid_norms[layer_idx, :] = self._batch_head_resid_norms[layer_idx][sample_idx, :]
+                # 注意：缺失层保持为 0，但这不会影响统计（因为我们不会对它们更新）
+            
+            # 只更新有数据的层
+            if len(missing_layers) < self.num_layers:  # 至少有一层有数据
+                self.head_output_norm_stats.update(sample_head_output_norms)
+                self.head_resid_contrib_norm_stats.update(sample_head_resid_norms)
+        
+        # 清空 batch 缓存
         self._batch_head_output_norms = {}
         self._batch_head_resid_norms = {}
     
     def get_results(self) -> Dict[str, np.ndarray]:
         """
-        Get final statistics.
+        获取最终统计结果。
         
         Returns:
-            Dictionary with statistics
+            包含统计信息的字典
         """
         return {
             "head_output_norm_mean": self.head_output_norm_stats.get_mean(),
@@ -468,9 +376,8 @@ class HookManager:
         }
     
     def remove_hooks(self) -> None:
-        """Remove all hooks."""
+        """移除所有 hooks。"""
         for handle in self.hook_handles:
             handle.remove()
         self.hook_handles = []
         logger.info("Removed all hooks")
-

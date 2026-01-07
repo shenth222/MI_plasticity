@@ -1,0 +1,18 @@
+{
+  "model_path": "/data1/shenth/models/llama/3.2-1b",
+  "dtype": "fp16",
+  "device_map": "cuda",
+  "attn_implementation": null,
+  "data_dir": "/data1/shenth/datasets/commonsense/origin/arc_c/",
+  "max_samples": -1,
+  "batch_size": 4,
+  "max_length": 256,
+  "num_workers": 0,
+  "template_name": "arc_mcq_v1",
+  "few_shot": 0,
+  "token_agg": "last",
+  "output_dir": "./outputs",
+  "save_every": null,
+  "seed": 42,
+  "experiment_name": "arc_head_activation"
+}

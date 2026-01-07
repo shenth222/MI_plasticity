@@ -1,5 +1,7 @@
 # 快速开始指南
 
+> **💡 2025-01-06 更新**：代码已大幅简化（~42% 代码减少），性能提升。详见 [SIMPLIFICATION_NOTE.md](SIMPLIFICATION_NOTE.md)
+
 ## 5 分钟上手
 
 ### 1️⃣ 安装依赖

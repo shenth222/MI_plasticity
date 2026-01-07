@@ -196,8 +196,9 @@ def main():
                 continue
             
             # Move to device
-            input_ids = batch["input_ids"]
-            attention_mask = batch["attention_mask"]
+            device = next(model.parameters()).device
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
             
             # Set attention mask in hook manager
             hook_manager.set_attention_mask(attention_mask)
@@ -250,11 +251,13 @@ def main():
     
     results = hook_manager.get_results()
     
-    # Save numpy arrays
-    np.save(output_dir / "head_output_norm_mean.npy", results["head_output_norm_mean"])
-    np.save(output_dir / "head_output_norm_std.npy", results["head_output_norm_std"])
-    np.save(output_dir / "head_resid_contrib_norm_mean.npy", results["head_resid_contrib_norm_mean"])
-    np.save(output_dir / "head_resid_contrib_norm_std.npy", results["head_resid_contrib_norm_std"])
+    # Save arrays as CSV for easy direct opening and reading
+    import pandas as pd
+
+    pd.DataFrame(results["head_output_norm_mean"]).to_csv(output_dir / "head_output_norm_mean.csv", index=False)
+    pd.DataFrame(results["head_output_norm_std"]).to_csv(output_dir / "head_output_norm_std.csv", index=False)
+    pd.DataFrame(results["head_resid_contrib_norm_mean"]).to_csv(output_dir / "head_resid_contrib_norm_mean.csv", index=False)
+    pd.DataFrame(results["head_resid_contrib_norm_std"]).to_csv(output_dir / "head_resid_contrib_norm_std.csv", index=False)
     
     logger.info(f"Saved activation statistics to {output_dir}")
     

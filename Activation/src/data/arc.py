@@ -26,7 +26,7 @@ class ARCDataset(DatasetBase):
                  template_name: str = "arc_mcq_v1",
                  few_shot: int = 0,
                  max_samples: int = -1,
-                 split: str = "test"):
+                 split: str = "train"):
         """
         Initialize ARC dataset.
         

@@ -246,13 +246,16 @@ def my_template(question, option_labels, option_texts, few_shot=0):
 
 ## 技术细节
 
-### Hook 机制
+### Hook 机制（精简版）
 
-本项目通过 forward hook 在每个 attention 层采集激活：
+**2025-01-06 更新**：代码已大幅简化，避免重复计算。
 
-1. **Hook 位置**: `model.model.layers[i].self_attn`
-2. **采集方式**: 重计算 attention 以获取 per-head 输出
+核心思路：
+1. **Hook 位置**: `model.model.layers[i].self_attn.o_proj`（在 o_proj 的 pre-hook）
+2. **采集方式**: 直接捕获 o_proj 的输入（即 per-head 输出），无需重新计算 attention
 3. **内存优化**: 使用在线统计（Welford 算法），不存储所有激活
+
+详见 `SIMPLIFICATION_NOTE.md` 了解简化细节
 
 ### Head Output Norm
 

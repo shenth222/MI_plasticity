@@ -1,0 +1,25 @@
+{
+  "model_path": "/data1/shenth/models/llama/3.2-1b",
+  "dtype": "fp16",
+  "device_map": "cuda",
+  "num_layers": 16,
+  "num_heads": 32,
+  "head_dim": 64,
+  "hidden_size": 2048,
+  "token_agg": "last",
+  "template_name": "arc_mcq_v1",
+  "few_shot": 0,
+  "max_samples": -1,
+  "batch_size": 4,
+  "max_length": 256,
+  "num_processed": 1168,
+  "num_skipped": 0,
+  "dataset_stats": {
+    "total_examples": 1172,
+    "num_4opt": 1165,
+    "num_5opt": 3,
+    "num_skipped": 4
+  },
+  "timestamp": "20260107_142619",
+  "seed": 42
+}
