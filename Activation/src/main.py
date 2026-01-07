@@ -131,7 +131,7 @@ def main():
         template_name=config.template_name,
         few_shot=config.few_shot,
         max_samples=config.max_samples,
-        split="test"
+        split="train"
     )
     
     # Load model and tokenizer
@@ -320,6 +320,83 @@ def main():
     logger.info(f"  Std range: [{results['head_resid_contrib_norm_std'].min():.4f}, {results['head_resid_contrib_norm_std'].max():.4f}]")
     logger.info(f"\nAll results saved to: {output_dir}")
     logger.info("=" * 80)
+
+    # INSERT_YOUR_CODE
+
+    import numpy as np
+
+    def quantile_max_values(data: np.ndarray, percentiles=[0.1, 0.2, 0.5, 0.8, 0.9, 0.99]):
+        """
+        For a given 2D matrix, flatten, sort, and for each percentile, 
+        return the max value among the lowest quantile fraction.
+        Returns: dict of {percentile: max_value_within_percentile}
+        """
+        flat = data.flatten()
+        sorted_flat = np.sort(flat)
+        n = len(sorted_flat)
+        quantile_values = {}
+        for p in percentiles:
+            count = int(np.ceil(n * p))
+            if count < 1:
+                count = 1
+            quantile_max = sorted_flat[count-1]  # max in bottom p%
+            quantile_values[p] = quantile_max
+        return quantile_values
+
+    def plot_quantile_heatmaps(data: np.ndarray, quantiles: dict, title_prefix: str, output_dir: Path, heatmap_base_name: str):
+        """
+        For each quantile, create a heatmap where only the values in that quantile or below are kept, others set to np.nan.
+        """
+        for p, max_val in quantiles.items():
+            masked_data = np.where(data <= max_val, data, np.nan)
+            quantile_name = f"{int(p*100)}"
+            plot_title = f"{title_prefix} <= top {quantile_name}%"
+            file_name = output_dir / f"{heatmap_base_name}_top{quantile_name}percent.png"
+            plot_heatmap(
+                data=masked_data,
+                title=plot_title,
+                output_path=file_name
+            )
+            logger.info(f"Saved quantile heatmap {plot_title} to {file_name}")
+
+    # 需要确保results里的mean是np.ndarray类型，否则先转一下
+    head_output_norm_mean = results["head_output_norm_mean"]
+    if not isinstance(head_output_norm_mean, np.ndarray):
+        head_output_norm_mean = np.array(head_output_norm_mean)
+    head_resid_contrib_norm_mean = results["head_resid_contrib_norm_mean"]
+    if not isinstance(head_resid_contrib_norm_mean, np.ndarray):
+        head_resid_contrib_norm_mean = np.array(head_resid_contrib_norm_mean)
+
+    percentiles = [0.1, 0.2, 0.5, 0.8, 0.9, 0.99]
+
+    logger.info("head_output_norm_mean quantile max values:")
+    ho_quantiles = quantile_max_values(head_output_norm_mean, percentiles=percentiles)
+    for p in percentiles:
+        logger.info(f"  {int(p*100)}% max: {ho_quantiles[p]:.6f}")
+
+    logger.info("head_resid_contrib_norm_mean quantile max values:")
+    hrc_quantiles = quantile_max_values(head_resid_contrib_norm_mean, percentiles=percentiles)
+    for p in percentiles:
+        logger.info(f"  {int(p*100)}% max: {hrc_quantiles[p]:.6f}")
+
+    # 画每个档位的热力图
+    logger.info("Plotting quantile heatmaps for head_output_norm_mean...")
+    plot_quantile_heatmaps(
+        data=head_output_norm_mean,
+        quantiles=ho_quantiles,
+        title_prefix="Head Output Norm (Mean)",
+        output_dir=output_dir,
+        heatmap_base_name="head_output_norm_quantile"
+    )
+
+    logger.info("Plotting quantile heatmaps for head_resid_contrib_norm_mean...")
+    plot_quantile_heatmaps(
+        data=head_resid_contrib_norm_mean,
+        quantiles=hrc_quantiles,
+        title_prefix="Head Residual Contribution Norm (Mean)",
+        output_dir=output_dir,
+        heatmap_base_name="head_resid_contrib_norm_quantile"
+    )
     
     # Clean up hooks
     hook_manager.remove_hooks()
