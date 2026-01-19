@@ -1,0 +1,44 @@
+# configs/mnli.yaml
+# Optional configuration file for MNLI experiments
+# (Currently not used by scripts, but kept for reference)
+
+task: MNLI
+model_name: microsoft/deberta-v3-base
+
+# Training hyperparameters
+training:
+  seed: 1
+  max_len: 256
+  learning_rate: 2.0e-5
+  num_epochs: 3.0
+  batch_size: 16
+  
+  # Precision (auto-selected in code)
+  # Priority: bf16 > fp16 > fp32
+  auto_precision: true
+
+# Evaluation subset
+eval_subset:
+  size: 1024
+  seed: 999  # Fixed for reproducibility
+
+# Measurement settings
+measurement:
+  batch_size: 16
+  lambda_eps: 1.0e-6  # For Fisher regularization
+
+# Analysis settings
+analysis:
+  top_k: 20  # For top-k overlap metric
+  
+  # Case detection thresholds (percentiles)
+  important_but_static:
+    importance_percentile: 90  # Top 10%
+    update_percentile: 30      # Bottom 30%
+  
+  plastic_but_unimportant:
+    update_percentile: 90      # Top 10%
+    importance_percentile: 30  # Bottom 30%
+
+# Output paths (relative to workspace root)
+output_dir: outputs/${task}/seed${seed}

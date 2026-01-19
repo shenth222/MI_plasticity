@@ -1,0 +1,269 @@
+================================================================================
+项目交付清单
+================================================================================
+
+项目名称：最小可复现实验 - Head 粒度下"重要性 ≠ 可塑性/更新量"
+项目路径：/data1/shenth/work/MI_plasticity/minimal-exp
+交付日期：2026-01-16
+生成工具：Cursor AI (Claude Sonnet 4.5)
+
+================================================================================
+一、交付文件统计
+================================================================================
+
+总文件数：28 个
+
+1. 文档文件（6 个）
+   - README.md           主文档（完整说明 + 常见问题）
+   - QUICKSTART.md       快速开始指南
+   - CHECKLIST.md        完整性检查清单
+   - PROJECT_FILES.md    文件清单与说明
+   - SUMMARY.md          项目生成总结
+   - INDEX.md            文档快速导航
+
+2. Python 源代码（16 个）
+   - src/__init__.py
+   - src/data/__init__.py
+   - src/data/glue.py                    ✨ 新增
+   - src/model/__init__.py
+   - src/model/deberta_head_gating.py    ✅ 已有（已验证）
+   - src/train/__init__.py
+   - src/train/finetune_glue.py          ✅ 已修正（BF16/FP16）
+   - src/measure/__init__.py
+   - src/measure/importance_ablation.py  ✅ 已有
+   - src/measure/grad_fisher_gate.py     ✅ 已有
+   - src/measure/update_magnitude.py     ✅ 已有
+   - src/analysis/__init__.py
+   - src/analysis/make_subset.py         ✅ 已修正（seed=999）
+   - src/analysis/aggregate.py           ✨ 新增
+   - src/analysis/plots.py               ✨ 新增
+   - test_setup.py                       ✨ 新增（环境测试）
+
+3. Shell 脚本（3 个）
+   - scripts/run_mnli.sh                 ✨ 新增
+   - scripts/measure_mnli.sh             ✨ 新增
+   - scripts/make_plots.sh               ✨ 新增
+
+4. 配置文件（3 个）
+   - requirements.txt                    ✨ 新增
+   - configs/mnli.yaml                   ✨ 新增（可选参考）
+   - .gitignore                          ✨ 新增
+
+图例：
+✨ 新增     - 本次生成的文件
+✅ 已有     - 用户提供的文件（已验证兼容）
+✅ 已修正   - 用户提供的文件（进行了最小修改）
+
+================================================================================
+二、核心功能清单
+================================================================================
+
+✅ 数据加载
+   - MNLI 在线加载（validation_matched）
+   - 自动 tokenization（max_len=256）
+   - 动态 padding（collate_fn）
+   - eval_raw 供 Subset 使用
+
+✅ 模型训练
+   - DeBERTa-v3-base 全量微调
+   - BF16/FP16/FP32 自动选择
+   - 保存 θ0（ckpt_init）和 θ1（ckpt_final）
+   - HuggingFace Trainer
+
+✅ 重要性测量
+   - Head-level ablation（gate hook）
+   - 微调前后重要性（importance_pre/post.jsonl）
+   - 固定 eval subset（1024 条，seed=999）
+
+✅ 可塑性测量
+   - 梯度幅值（G = mean |∂L/∂gate|）
+   - Fisher 近似（F = mean (∂L/∂gate)^2）
+   - 预测可塑性（Ppred = G^2 / F）
+
+✅ 更新量计算
+   - Q/K/V/O 切片聚合
+   - 绝对更新量（U）
+   - 相对更新量（Urel）
+
+✅ 反例检测
+   - important-but-static（I_pre top10% & Urel bottom30%）
+   - plastic-but-unimportant（Urel top10% & I_pre bottom30%）
+
+✅ 数据汇总
+   - JSONL → CSV（heads.csv）
+   - 统计指标（stats.json）
+   - 反例集合（cases.json）
+
+✅ 可视化
+   - fig_I_vs_U.png（重要性 vs 更新量）
+   - fig_I_vs_G.png（重要性 vs 梯度）
+   - fig_stats.png（统计指标）
+   - 使用 matplotlib（无 seaborn，无颜色指定）
+
+================================================================================
+三、快速开始（一键三步）
+================================================================================
+
+步骤 1：安装依赖
+    pip install -r requirements.txt
+
+步骤 2：测试环境（可选但推荐）
+    python test_setup.py
+
+步骤 3：运行实验
+    bash scripts/run_mnli.sh 1      # 训练（30-60 分钟）
+    bash scripts/measure_mnli.sh 1  # 测量（1-2 小时）
+    bash scripts/make_plots.sh 1    # 可视化（< 1 分钟）
+
+步骤 4：查看结果
+    cat outputs/MNLI/seed1/stats.json
+    cat outputs/MNLI/seed1/cases.json
+    ls outputs/MNLI/seed1/*.png
+
+================================================================================
+四、验收标准
+================================================================================
+
+数据完整性：
+  ✓ heads.csv 包含 144 行（12 layers × 12 heads）
+  ✓ 所有 JSONL 文件行数 = 144
+  ✓ cases.json 包含两类反例（非空）
+
+数值合理性：
+  ✓ Spearman ρ(I_pre, U) < 0.5（弱相关）
+  ✓ Top-20 overlap < 0.3（top head 不一致）
+  ✓ Important-but-static cases ≥ 3
+  ✓ Plastic-but-unimportant cases ≥ 3
+
+可视化质量：
+  ✓ 三张 PNG 图生成成功
+  ✓ 散点图中两类反例用不同 marker 标记
+  ✓ 图表使用默认 matplotlib 配色
+
+================================================================================
+五、技术亮点
+================================================================================
+
+1. 最小改动原则
+   - 用户已有代码仅修改 2 处（最小必要改动）
+   - 保持函数名、类名、接口一致
+
+2. 兼容性保证
+   - transformers 4.57.5（hook 返回 tuple/list 处理）
+   - datasets 4.4.2（在线加载 GLUE）
+   - torch 2.9.1（BF16/FP16 自动检测）
+   - 无 scipy 依赖（Spearman 自实现）
+
+3. 健壮性设计
+   - Gate hook 未生效检测
+   - View/reshape 报错预防
+   - BF16/FP16 自动回退
+   - 错误提示清晰
+
+4. 文档完善
+   - 6 个文档文件，互相补充
+   - 覆盖快速开始、技术细节、问题排查
+   - 预期输出示例
+
+5. 一键可运行
+   - 三条命令跑通完整流程
+   - 自动化程度高
+   - 支持多种子实验
+
+================================================================================
+六、输出文件说明
+================================================================================
+
+运行完整流程后，outputs/MNLI/seed{seed}/ 包含 15 个文件：
+
+检查点：
+  - ckpt_init/               θ0（初始模型）
+  - ckpt_final/              θ1（微调后最佳模型）
+  - trainer_out/             Trainer 中间文件
+
+测量结果：
+  - eval_subset.json         固定 subset 索引（1024 条）
+  - importance_pre.jsonl     重要性（微调前，144 行）
+  - gradfisher_pre.jsonl     梯度与 Fisher（144 行）
+  - update.jsonl             更新量（144 行）
+  - importance_post.jsonl    重要性（微调后，144 行）
+
+汇总与可视化：
+  - heads.csv                汇总表（144 行，13 列）
+  - stats.json               统计指标（Spearman ρ, overlap, 反例数量）
+  - cases.json               反例集合（两类）
+  - fig_I_vs_U.png           散点图 1（重要性 vs 更新量）
+  - fig_I_vs_G.png           散点图 2（重要性 vs 梯度）
+  - fig_stats.png            统计图（柱状图）
+
+================================================================================
+七、常见问题快速索引
+================================================================================
+
+Q1: Gate hook 未生效？
+    → 查看 README.md § 常见问题排查 § 1. Gate hook 未生效
+
+Q2: View/reshape 报错？
+    → 查看 README.md § 常见问题排查 § 2. View/Reshape 报错
+
+Q3: 训练时间过长？
+    → 查看 README.md § 常见问题排查 § 5. 运行时间过长
+
+Q4: MNLI split 名称错误？
+    → 查看 README.md § 常见问题排查 § 3. MNLI split 名称错误
+
+Q5: BF16/FP16 切换失败？
+    → 查看 README.md § 常见问题排查 § 4. BF16/FP16 切换失败
+
+Q6: 模型结构不匹配？
+    → 查看 README.md § 常见问题排查 § 6. 模型结构不匹配
+
+更多问题请查阅完整文档：
+  - README.md（主文档）
+  - QUICKSTART.md（快速开始）
+  - CHECKLIST.md（验证清单）
+
+================================================================================
+八、文档导航
+================================================================================
+
+立即开始        → QUICKSTART.md
+完整说明        → README.md
+完整性检查      → CHECKLIST.md
+文件清单        → PROJECT_FILES.md
+生成总结        → SUMMARY.md
+文档导航        → INDEX.md
+
+================================================================================
+九、技术支持
+================================================================================
+
+遇到问题？按以下顺序排查：
+
+1. 运行环境测试
+   python test_setup.py
+
+2. 查看文档
+   - README.md § 常见问题排查
+   - QUICKSTART.md § 调试技巧
+
+3. 验证输出
+   ls outputs/MNLI/seed1/*.jsonl  # 应有 4 个文件
+   wc -l outputs/MNLI/seed1/*.jsonl  # 每个应有 144 行
+
+================================================================================
+十、交付确认
+================================================================================
+
+✅ 所有文件已生成（28 个）
+✅ 所有功能已实现（8 个核心功能）
+✅ 文档完整详尽（6 个文档）
+✅ 一键可运行（3 条命令）
+✅ 验收标准明确（数值 + 可视化）
+✅ 测试工具完备（test_setup.py）
+
+项目状态：完全就绪，可立即运行
+
+================================================================================
+结束
+================================================================================
