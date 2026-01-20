@@ -47,7 +47,7 @@ python -m src.measure.importance_ablation \
     --ckpt_dir ${OUT_DIR}/ckpt_init \
     --subset_path ${OUT_DIR}/eval_subset.json \
     --out_jsonl ${OUT_DIR}/importance_pre.jsonl \
-    --bsz 16 \
+    --bsz 128 \
     --max_len 256
 
 echo "Saved: ${OUT_DIR}/importance_pre.jsonl"

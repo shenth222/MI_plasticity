@@ -15,7 +15,7 @@ rcParams['legend.fontsize'] = 9
 
 def load_csv(path: str):
     """Load heads.csv into numpy arrays."""
-    data = np.genfromtxt(path, delimiter=',', skip_header=1, names=True)
+    data = np.genfromtxt(path, delimiter=',', names=True)
     return data
 
 
@@ -60,7 +60,7 @@ def plot_I_vs_U(data, cases, out_path):
     
     # All other points
     normal_mask = np.ones(len(data), dtype=bool)
-    for idx in ibs_indices | pbu_indices:
+    for idx in ibs_indices | pbu_indices: 
         normal_mask[idx] = False
     
     # Plot normal points

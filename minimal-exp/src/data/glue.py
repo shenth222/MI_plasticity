@@ -2,6 +2,8 @@
 import torch
 from datasets import load_dataset
 from typing import Dict, Any, List
+from functools import partial
+import os
 
 GLUE_TASK_CONFIGS = {
     "MNLI": {
@@ -28,6 +30,17 @@ GLUE_TASK_CONFIGS = {
     },
 }
 
+# Tokenization function
+def preprocess_function(examples, tokenizer, s1_key, s2_key, max_len, label_key):
+    encoded = tokenizer(
+        examples[s1_key],
+        examples[s2_key],
+        truncation=True,
+        max_length=max_len,
+        padding=False,  # dynamic padding in collate_fn
+    )
+    encoded["labels"] = examples[label_key]
+    return encoded
 
 def load_glue_dataset(task: str, tokenizer, max_len: int = 256) -> Dict[str, Any]:
     """
@@ -58,36 +71,37 @@ def load_glue_dataset(task: str, tokenizer, max_len: int = 256) -> Dict[str, Any
     s2_key = cfg["sentence2_key"]
     label_key = cfg["label_key"]
     
-    # Tokenization function
-    def preprocess_function(examples):
-        return tokenizer(
-            examples[s1_key],
-            examples[s2_key],
-            truncation=True,
-            max_length=max_len,
-            padding=False,  # dynamic padding in collate_fn
-        )
+    preproc = partial(
+        preprocess_function,
+        tokenizer=tokenizer,
+        s1_key=s1_key,
+        s2_key=s2_key,
+        max_len=max_len,
+        label_key=label_key,
+    )
     
     # Tokenize
-    print("Tokenizing train")
+    # print("Tokenizing train")
     train_tokenized = train_ds.map(
-        preprocess_function,
+        preproc,
         batched=True,
+        num_proc=8,
         remove_columns=train_ds.column_names,
         desc="Tokenizing train"
     )
-    train_tokenized = train_tokenized.add_column("labels", train_ds[label_key])
+    # train_tokenized = train_tokenized.add_column("labels", train_ds[label_key])
     
-    print("Tokenizing eval")
+    # print("Tokenizing eval")
     eval_tokenized = eval_ds.map(
-        preprocess_function,
+        preproc,
         batched=True,
+        num_proc=8,
         remove_columns=eval_ds.column_names,
         desc="Tokenizing eval"
     )
-    eval_tokenized = eval_tokenized.add_column("labels", eval_ds[label_key])
+    # eval_tokenized = eval_tokenized.add_column("labels", eval_ds[label_key])
     
-    print("Setting format to torch tensors")
+    # print("Setting format to torch tensors")
     # Set format to torch tensors
     train_tokenized.set_format("torch")
     eval_tokenized.set_format("torch")
@@ -107,10 +121,19 @@ def load_glue_dataset(task: str, tokenizer, max_len: int = 256) -> Dict[str, Any
         input_ids = [item["input_ids"] for item in batch]
         attention_mask = [item["attention_mask"] for item in batch]
         labels = torch.tensor([item["labels"] for item in batch], dtype=torch.long)
+
+        to_pad = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask
+        }
+
+        # 如果存在 token_type_ids，一起填充
+        if "token_type_ids" in batch[0]:
+            to_pad["token_type_ids"] = [item["token_type_ids"] for item in batch]
         
         # Pad using tokenizer
         padded = tokenizer.pad(
-            {"input_ids": input_ids, "attention_mask": attention_mask},
+            to_pad,
             padding=True,
             return_tensors="pt"
         )
@@ -121,15 +144,9 @@ def load_glue_dataset(task: str, tokenizer, max_len: int = 256) -> Dict[str, Any
             "labels": labels,
         }
         
-        # Add token_type_ids if present
-        if "token_type_ids" in batch[0]:
-            token_type_ids = [item["token_type_ids"] for item in batch]
-            padded_tt = tokenizer.pad(
-                {"token_type_ids": token_type_ids},
-                padding=True,
-                return_tensors="pt"
-            )
-            result["token_type_ids"] = padded_tt["token_type_ids"]
+        # 如果填充结果中包含 token_type_ids，添加到结果中
+        if "token_type_ids" in padded:
+            result["token_type_ids"] = padded["token_type_ids"]
         
         return result
     

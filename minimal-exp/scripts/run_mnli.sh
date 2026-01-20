@@ -19,7 +19,7 @@ python -m src.train.finetune_glue \
     --max_len 256 \
     --lr 2e-5 \
     --epochs 3 \
-    --bsz 16
+    --bsz 128
 
 echo ""
 echo "Training complete. Checkpoints saved to:"

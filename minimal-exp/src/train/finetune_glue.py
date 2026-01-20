@@ -21,8 +21,6 @@ def main():
 
     tok = AutoTokenizer.from_pretrained(args.model_name, use_fast=False)
     ds = load_glue_dataset(args.task, tok, max_len=args.max_len)
-    print("load dataset done")
-    exit()
 
     model = AutoModelForSequenceClassification.from_pretrained(args.model_name, num_labels=ds["num_labels"])
 
@@ -47,7 +45,7 @@ def main():
         per_device_eval_batch_size=args.bsz,
         learning_rate=args.lr,
         num_train_epochs=args.epochs,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model=ds["metric_for_best_model"],

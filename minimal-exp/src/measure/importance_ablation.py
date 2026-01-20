@@ -11,7 +11,8 @@ from src.model.deberta_head_gating import DebertaV2HeadGate, HeadGatingConfig
 def eval_loss(model, dl, device):
     model.eval()
     tot_loss, tot_n = 0.0, 0
-    for batch in dl:
+    from tqdm import tqdm
+    for batch in tqdm(dl, desc="Evaluating", leave=False):
         batch = {k: v.to(device) for k, v in batch.items()}
         out = model(**batch)
         loss = out.loss
