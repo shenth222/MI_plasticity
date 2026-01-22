@@ -12,7 +12,7 @@ import json
 @dataclass
 class ModelConfig:
     """模型相关配置"""
-    model_name_or_path: str = "/data1/shenth/models/deberta-v3-base"  # 修改为实际路径
+    model_name_or_path: str = "/data1/shenth/models/deberta/v3-base"  # 修改为实际路径
     tokenizer_name: Optional[str] = None
     cache_dir: Optional[str] = None
     use_fast_tokenizer: bool = True
