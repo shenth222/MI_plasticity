@@ -110,10 +110,10 @@ try:
     overlap = top_k_overlap(x, y, k=3)
     
     print(f"  - rank_correlation([1,2,3,4,5], [2,3,4,5,6]) = {rho:.3f} (expect 1.0)")
-    print(f"  - top_k_overlap([1,2,3,4,5], [2,3,4,5,6], k=3) = {overlap:.3f} (expect 0.667)")
+    print(f"  - top_k_overlap([1,2,3,4,5], [2,3,4,5,6], k=3) = {overlap:.3f} (expect 1.0)")
     
     assert abs(rho - 1.0) < 0.01, f"rank_correlation failed: {rho}"
-    assert abs(overlap - 0.667) < 0.1, f"top_k_overlap failed: {overlap}"
+    assert abs(overlap - 1.0) < 0.01, f"top_k_overlap failed: {overlap}"
     
     print("✓ Utility functions work correctly")
 except Exception as e:

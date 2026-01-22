@@ -44,6 +44,7 @@ def main():
 
     for batch in dl:
         model.zero_grad(set_to_none=True)
+        gatewrap.gates.grad = None
         batch = {k: v.to(device) for k, v in batch.items()}
         out = model(**batch)
         loss = out.loss

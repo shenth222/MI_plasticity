@@ -61,9 +61,12 @@ def load_glue_dataset(task: str, tokenizer, max_len: int = 256) -> Dict[str, Any
     
     cfg = GLUE_TASK_CONFIGS[task]
     
-    # Load dataset from HuggingFace
-    # raw_datasets = load_dataset(cfg["dataset_name"], cfg["subset_name"])
-    raw_datasets = load_dataset("/data1/shenth/datasets/glue", "mnli")
+    # Load dataset from local path if available, otherwise from HuggingFace
+    local_glue_path = os.environ.get("GLUE_DATA_PATH", "/data1/shenth/datasets/glue")
+    if local_glue_path and os.path.exists(local_glue_path):
+        raw_datasets = load_dataset(local_glue_path, cfg["subset_name"])
+    else:
+        raw_datasets = load_dataset(cfg["dataset_name"], cfg["subset_name"])
     train_ds = raw_datasets[cfg["train_split"]]
     eval_ds = raw_datasets[cfg["eval_split"]]
     

@@ -27,6 +27,15 @@ def rank_correlation(x: np.ndarray, y: np.ndarray) -> float:
         sorter = np.argsort(arr)
         ranks = np.empty_like(sorter, dtype=float)
         ranks[sorter] = np.arange(1, len(arr) + 1)
+
+        # Handle ties by assigning average rank per unique value
+        uniq, inv, counts = np.unique(arr, return_inverse=True, return_counts=True)
+        if np.any(counts > 1):
+            sum_ranks = np.zeros_like(uniq, dtype=float)
+            for i, r in zip(inv, ranks):
+                sum_ranks[i] += r
+            avg_ranks = sum_ranks / counts
+            ranks = avg_ranks[inv]
         return ranks
     
     rx = rankdata(x)
@@ -45,8 +54,8 @@ def top_k_overlap(x: np.ndarray, y: np.ndarray, k: int) -> float:
         raise ValueError("x and y must have same length")
     if k > len(x):
         k = len(x)
-    topk_x = set(x[np.argsort(x)[-k:]])
-    topk_y = set(y[np.argsort(y)[-k:]])
+    topk_x = set(np.argsort(x)[-k:])
+    topk_y = set(np.argsort(y)[-k:])
     return len(topk_x & topk_y) / k
 
 
