@@ -173,6 +173,79 @@ def plot_stats(stats, out_path):
     print(f"Saved {out_path}")
 
 
+def plot_I_pre_vs_I_post(data, out_path):
+    """
+    Scatter plot: I_pre vs I_post (post-training importance).
+    """
+    fig, ax = plt.subplots(figsize=(6, 5))
+
+    I_pre = data['I_pre']
+    I_post = data['I_post']
+
+    valid_mask = ~np.isnan(I_post)
+    I_pre = I_pre[valid_mask]
+    I_post = I_post[valid_mask]
+
+    ax.scatter(I_pre, I_post, s=20, alpha=0.6, marker='o')
+
+    if len(I_pre) > 0:
+        vmin = float(min(I_pre.min(), I_post.min()))
+        vmax = float(max(I_pre.max(), I_post.max()))
+        ax.plot([vmin, vmax], [vmin, vmax], linestyle='--', color='gray', linewidth=1, alpha=0.8)
+
+    ax.set_xlabel('Importance (I_pre)')
+    ax.set_ylabel('Importance (I_post)')
+    ax.set_title('Importance: Pre vs Post')
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"Saved {out_path}")
+
+
+def plot_Ipost_correlations(stats, out_path):
+    """
+    Bar plot: Spearman correlations between I_post and {U, Urel, G, F, Ppred}.
+    """
+    keys = [
+        ("U", "spearman_rho_Ipost_U"),
+        ("Urel", "spearman_rho_Ipost_Urel"),
+        ("G", "spearman_rho_Ipost_G"),
+        ("F", "spearman_rho_Ipost_F"),
+        ("Ppred", "spearman_rho_Ipost_Ppred"),
+    ]
+    labels = [k[0] for k in keys]
+    values = [stats.get(k[1], float("nan")) for k in keys]
+
+    # Drop NaNs (e.g., when I_post missing)
+    labels_f = []
+    values_f = []
+    for l, v in zip(labels, values):
+        if not np.isnan(v):
+            labels_f.append(l)
+            values_f.append(v)
+
+    if len(values_f) == 0:
+        print(f"Skip {out_path}: no valid I_post correlations")
+        return
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.bar(labels_f, values_f, alpha=0.7)
+    ax.set_ylabel('Spearman ρ')
+    ax.set_title('I_post vs. {U, Urel, G, F, Ppred}')
+    ax.set_ylim([-1.0, 1.0])
+    ax.grid(True, alpha=0.3, axis='y')
+
+    for i, (m, v) in enumerate(zip(labels_f, values_f)):
+        ax.text(i, v + (0.02 if v >= 0 else -0.06), f'{v:.3f}', ha='center', va='bottom' if v >= 0 else 'top')
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"Saved {out_path}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--exp_dir", required=True, help="e.g. outputs/MNLI/seed1")
@@ -197,6 +270,8 @@ def main():
     plot_I_vs_U(data, cases, os.path.join(args.exp_dir, "fig_I_vs_U.png"))
     plot_I_vs_G(data, cases, os.path.join(args.exp_dir, "fig_I_vs_G.png"))
     plot_stats(stats, os.path.join(args.exp_dir, "fig_stats.png"))
+    plot_I_pre_vs_I_post(data, os.path.join(args.exp_dir, "fig_Ipre_vs_Ipost.png"))
+    plot_Ipost_correlations(stats, os.path.join(args.exp_dir, "fig_Ipost_corrs.png"))
 
 
 if __name__ == "__main__":

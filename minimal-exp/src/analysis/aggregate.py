@@ -141,18 +141,49 @@ def main():
     
     # Compute stats
     I_pre = np.array([rec["I_pre"] for rec in heads])
+    I_post = np.array([rec["I_post"] for rec in heads])
     U = np.array([rec["U"] for rec in heads])
     Urel = np.array([rec["Urel"] for rec in heads])
-    G = np.array([rec["G"] for rec in heads if not np.isnan(rec["G"])])
-    Ppred = np.array([rec["Ppred"] for rec in heads if not np.isnan(rec["Ppred"])])
+    G = np.array([rec["G"] for rec in heads])
+    F = np.array([rec["F"] for rec in heads])
+    Ppred = np.array([rec["Ppred"] for rec in heads])
     
     # Spearman correlation I_pre vs U
     rho_Ipre_U = rank_correlation(I_pre, U)
     rho_Ipre_Urel = rank_correlation(I_pre, Urel)
+
+    # Spearman correlation I_post vs (U, Urel, G, F, Ppred) if available
+    valid_Ipost_mask = ~np.isnan(I_post)
+    if np.any(valid_Ipost_mask):
+        Ipost_v = I_post[valid_Ipost_mask]
+        rho_Ipost_U = rank_correlation(Ipost_v, U[valid_Ipost_mask])
+        rho_Ipost_Urel = rank_correlation(Ipost_v, Urel[valid_Ipost_mask])
+
+        valid_G = valid_Ipost_mask & ~np.isnan(G)
+        valid_F = valid_Ipost_mask & ~np.isnan(F)
+        valid_Ppred = valid_Ipost_mask & ~np.isnan(Ppred)
+
+        rho_Ipost_G = rank_correlation(I_post[valid_G], G[valid_G]) if np.any(valid_G) else float("nan")
+        rho_Ipost_F = rank_correlation(I_post[valid_F], F[valid_F]) if np.any(valid_F) else float("nan")
+        rho_Ipost_Ppred = rank_correlation(I_post[valid_Ppred], Ppred[valid_Ppred]) if np.any(valid_Ppred) else float("nan")
+        n_heads_Ipost = int(valid_Ipost_mask.sum())
+    else:
+        rho_Ipost_U = float("nan")
+        rho_Ipost_Urel = float("nan")
+        rho_Ipost_G = float("nan")
+        rho_Ipost_F = float("nan")
+        rho_Ipost_Ppred = float("nan")
+        n_heads_Ipost = 0
     
     # Top-k overlap I_pre vs U
     overlap_Ipre_U = top_k_overlap(I_pre, U, k=args.topk)
     overlap_Ipre_Urel = top_k_overlap(I_pre, Urel, k=args.topk)
+
+    # Top-k overlap I_pre vs I_post (if available)
+    if np.any(valid_Ipost_mask):
+        overlap_Ipre_Ipost = top_k_overlap(I_pre[valid_Ipost_mask], I_post[valid_Ipost_mask], k=args.topk)
+    else:
+        overlap_Ipre_Ipost = float("nan")
     
     stats = {
         "spearman_rho_Ipre_U": rho_Ipre_U,
@@ -161,6 +192,13 @@ def main():
         "topk_overlap_Ipre_Urel": overlap_Ipre_Urel,
         "topk": args.topk,
         "n_heads": len(heads),
+        "n_heads_Ipost": n_heads_Ipost,
+        "topk_overlap_Ipre_Ipost": overlap_Ipre_Ipost,
+        "spearman_rho_Ipost_U": rho_Ipost_U,
+        "spearman_rho_Ipost_Urel": rho_Ipost_Urel,
+        "spearman_rho_Ipost_G": rho_Ipost_G,
+        "spearman_rho_Ipost_F": rho_Ipost_F,
+        "spearman_rho_Ipost_Ppred": rho_Ipost_Ppred,
     }
     
     # Compute case sets
@@ -238,6 +276,14 @@ def main():
     print(f"Spearman ρ(I_pre, Urel): {rho_Ipre_Urel:.3f}")
     print(f"Top-{args.topk} overlap (I_pre, U): {overlap_Ipre_U:.3f}")
     print(f"Top-{args.topk} overlap (I_pre, Urel): {overlap_Ipre_Urel:.3f}")
+    if not np.isnan(overlap_Ipre_Ipost):
+        print(f"Top-{args.topk} overlap (I_pre, I_post): {overlap_Ipre_Ipost:.3f}")
+    if not np.isnan(rho_Ipost_U):
+        print(f"Spearman ρ(I_post, U): {rho_Ipost_U:.3f}")
+        print(f"Spearman ρ(I_post, Urel): {rho_Ipost_Urel:.3f}")
+        print(f"Spearman ρ(I_post, G): {rho_Ipost_G:.3f}")
+        print(f"Spearman ρ(I_post, F): {rho_Ipost_F:.3f}")
+        print(f"Spearman ρ(I_post, Ppred): {rho_Ipost_Ppred:.3f}")
     print(f"Important-but-static cases: {len(important_but_static)}")
     print(f"Plastic-but-unimportant cases: {len(plastic_but_unimportant)}")
 
