@@ -63,27 +63,30 @@ def auto_detect_target_modules(model: torch.nn.Module) -> list:
     Returns:
         target_modules 列表
     """
-    target_modules = []
+    target_modules = set()
     
     # 遍历所有模块，找到 Linear layers
     for name, module in model.named_modules():
-        if isinstance(module, torch.nn.Linear):
-            # 检查是否是我们想要的模块
-            keywords = ["query", "key", "value", "dense"]
-            
-            for kw in keywords:
-                if kw in name.lower():
-                    # 提取模块名（去除层级前缀）
-                    parts = name.split(".")
-                    module_name = parts[-1]
-                    
-                    if module_name not in target_modules:
-                        target_modules.append(module_name)
-                    break
+        if not isinstance(module, torch.nn.Linear):
+            continue
+        
+        lname = name.lower()
+        
+        if lname.endswith("query_proj"):
+            target_modules.add("query_proj")
+        if lname.endswith("key_proj"):
+            target_modules.add("key_proj")
+        if lname.endswith("value_proj"):
+            target_modules.add("value_proj")
+        if lname.endswith("output.dense"):
+            target_modules.add("output.dense")
+        if lname.endswith("intermediate.dense"):
+            target_modules.add("intermediate.dense")
     
-    logger.info(f"Auto-detected target modules: {target_modules}")
+    detected = sorted(target_modules)
+    logger.info(f"Auto-detected target modules: {detected}")
     
-    return target_modules
+    return detected
 
 
 def create_adalora_model(
@@ -113,6 +116,13 @@ def create_adalora_model(
         else:
             logger.warning("Auto-detection failed, using config target_modules")
     
+    # 确保 total_step 已设置
+    if adalora_config.total_step is None or adalora_config.total_step <= 0:
+        raise ValueError(
+            "AdaLoRA requires total_step > 0. Please compute it from the training setup "
+            "and set config.adalora.total_step before model creation."
+        )
+    
     # 创建 PEFT config
     peft_config = AdaLoraConfig(
         task_type=TaskType.SEQ_CLS,
@@ -130,6 +140,7 @@ def create_adalora_model(
         beta1=adalora_config.beta1,
         beta2=adalora_config.beta2,
         orth_reg_weight=adalora_config.orth_reg_weight,
+        total_step=adalora_config.total_step,
         fan_in_fan_out=adalora_config.fan_in_fan_out,
         bias=adalora_config.bias,
     )
@@ -141,6 +152,7 @@ def create_adalora_model(
     logger.info(f"  tinit: {adalora_config.tinit}")
     logger.info(f"  tfinal: {adalora_config.tfinal}")
     logger.info(f"  deltaT: {adalora_config.deltaT}")
+    logger.info(f"  total_step: {adalora_config.total_step}")
     logger.info(f"  target_modules: {target_modules}")
     
     # 应用 PEFT
@@ -153,12 +165,28 @@ def create_adalora_model(
     num_lora_modules = 0
     total_lora_params = 0
     
+    def _get_lora_param(lora_obj):
+        """兼容 PEFT 不同版本的 LoRA 参数结构"""
+        if isinstance(lora_obj, torch.nn.ParameterDict):
+            value = lora_obj.get("default", next(iter(lora_obj.values())))
+        elif isinstance(lora_obj, dict):
+            value = lora_obj.get("default", next(iter(lora_obj.values())))
+        else:
+            value = lora_obj
+        
+        if hasattr(value, "weight"):
+            return value.weight
+        return value
+    
     for name, module in peft_model.named_modules():
         if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
             num_lora_modules += 1
-            lora_A = module.lora_A['default'].weight
-            lora_B = module.lora_B['default'].weight
-            total_lora_params += lora_A.numel() + lora_B.numel()
+            lora_A = _get_lora_param(module.lora_A)
+            lora_B = _get_lora_param(module.lora_B)
+            if lora_A is not None:
+                total_lora_params += lora_A.numel()
+            if lora_B is not None:
+                total_lora_params += lora_B.numel()
     
     logger.info(f"Number of LoRA modules: {num_lora_modules}")
     logger.info(f"Total LoRA parameters: {total_lora_params:,}")
@@ -185,6 +213,7 @@ if __name__ == "__main__":
     
     model_config = ModelConfig(model_name_or_path="microsoft/deberta-v3-base")
     adalora_config = AdaLoRAConfig()
+    adalora_config.total_step = 1000
     
     # 加载 base model
     base_model, tokenizer = load_base_model_and_tokenizer(model_config, num_labels=3)

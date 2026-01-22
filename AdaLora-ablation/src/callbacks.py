@@ -7,11 +7,128 @@ import logging
 from typing import Dict, Optional
 from transformers import TrainerCallback, TrainerState, TrainerControl, TrainingArguments
 import torch
-from signal import SignalTracker
+from signal_tracker import SignalTracker
 from patch_adalora import set_external_scores
 from logging_utils import JSONLWriter
 
 logger = logging.getLogger(__name__)
+
+
+def _clean_module_name(name: str) -> str:
+    """清理模块名（去除 PEFT 前缀等）"""
+    if "base_model.model." in name:
+        name = name.replace("base_model.model.", "")
+    return name
+
+
+def _clean_rank_pattern_key(key: str, adapter_name: Optional[str]) -> str:
+    """将 rank_pattern 的参数名清理为模块名"""
+    clean = key
+    if adapter_name:
+        clean = clean.replace(f".lora_E.{adapter_name}", "")
+        clean = clean.replace(f".lora_A.{adapter_name}", "")
+        clean = clean.replace(f".lora_B.{adapter_name}", "")
+    if ".lora_E." in clean:
+        clean = clean.split(".lora_E.")[0]
+    if ".lora_A." in clean:
+        clean = clean.split(".lora_A.")[0]
+    if ".lora_B." in clean:
+        clean = clean.split(".lora_B.")[0]
+    return _clean_module_name(clean)
+
+
+def _rank_pattern_to_module_ranks(rank_pattern: Dict, adapter_name: Optional[str]) -> Dict[str, int]:
+    """将 rank_pattern 转成 module -> active rank"""
+    ranks = {}
+    for key, mask in rank_pattern.items():
+        if mask is None:
+            continue
+        active = sum(1 for v in mask if bool(v))
+        clean_name = _clean_rank_pattern_key(key, adapter_name)
+        ranks[clean_name] = active
+    return ranks
+
+
+def _count_lora_modules(model: torch.nn.Module) -> int:
+    """统计 LoRA 模块数量"""
+    count = 0
+    for _, module in model.named_modules():
+        if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
+            count += 1
+    return count
+
+
+def _get_peft_config(model: torch.nn.Module):
+    """获取当前 PEFT config 与 adapter 名称"""
+    if hasattr(model, "peft_config") and model.peft_config:
+        adapter_name = list(model.peft_config.keys())[0]
+        return model.peft_config[adapter_name], adapter_name
+    return None, None
+
+
+def _get_rank_info(
+    model: torch.nn.Module,
+    rank_pattern: Optional[Dict] = None,
+    adapter_name: Optional[str] = None,
+    init_r: Optional[int] = None,
+) -> Dict:
+    """获取当前的 rank 分配信息"""
+    if rank_pattern:
+        ranks = _rank_pattern_to_module_ranks(rank_pattern, adapter_name)
+        total_rank = sum(ranks.values())
+        return {
+            "ranks": ranks,
+            "total_rank": total_rank,
+            "num_modules": len(ranks),
+        }
+    
+    # fallback: 使用当前 LoRA 维度作为近似
+    ranks = {}
+    for name, module in model.named_modules():
+        if not (hasattr(module, "lora_A") and hasattr(module, "lora_B")):
+            continue
+        try:
+            if adapter_name and adapter_name in module.lora_A:
+                lora_A = module.lora_A[adapter_name]
+            else:
+                lora_A = next(iter(module.lora_A.values()))
+            current_rank = lora_A.weight.shape[0]
+        except Exception:
+            current_rank = init_r or 0
+        
+        clean_name = _clean_module_name(name)
+        ranks[clean_name] = current_rank
+    
+    total_rank = sum(ranks.values())
+    return {
+        "ranks": ranks,
+        "total_rank": total_rank,
+        "num_modules": len(ranks),
+    }
+
+
+class MetricsWriterCallback(TrainerCallback):
+    """将 Trainer logs 写入 JSONL"""
+    
+    def __init__(self, metrics_logger: Optional[JSONLWriter] = None):
+        super().__init__()
+        self.metrics_logger = metrics_logger
+    
+    def on_log(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        logs: Optional[Dict] = None,
+        **kwargs,
+    ):
+        if self.metrics_logger is None or not logs:
+            return control
+        
+        record = {"step": state.global_step}
+        record.update(logs)
+        self.metrics_logger.write(record)
+        return control
 
 
 class AdaLoRACallback(TrainerCallback):
@@ -49,10 +166,8 @@ class AdaLoRACallback(TrainerCallback):
         self.log_rank_every = log_rank_every
         self.log_signal_every = log_signal_every
         self.use_external_scores = use_external_scores
-        
-        self.last_step = -1
     
-    def on_step_end(
+    def on_pre_optimizer_step(
         self,
         args: TrainingArguments,
         state: TrainerState,
@@ -61,18 +176,12 @@ class AdaLoRACallback(TrainerCallback):
         **kwargs,
     ):
         """
-        在每个训练步后调用
-        
-        注意：需要区分 optimizer step 和 gradient accumulation step
+        在 optimizer step 之前调用（梯度仍存在）
         """
-        # 检查是否真正进行了 optimizer step
-        # state.global_step 在 optimizer step 后才会增加
-        if state.global_step == self.last_step:
-            # 还在 gradient accumulation，不调用 update_and_allocate
-            return
+        if model is None:
+            return control
         
-        self.last_step = state.global_step
-        global_step = state.global_step
+        global_step = state.global_step + 1
         
         # 1. 更新 signal tracker（如果使用外部 scores）
         if self.use_external_scores and self.signal_tracker is not None:
@@ -90,70 +199,60 @@ class AdaLoRACallback(TrainerCallback):
                     "scores": scores,
                     "statistics": self.signal_tracker.get_statistics(),
                 })
+        return control
+
+    def on_optimizer_step(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        model: torch.nn.Module = None,
+        **kwargs,
+    ):
+        """
+        在 optimizer step 之后调用（权重已更新）
+        """
+        if model is None:
+            return control
+        
+        global_step = state.global_step + 1
         
         # 2. 调用 AdaLoRA 的 update_and_allocate
-        if hasattr(model, 'base_model') and hasattr(model.base_model, 'peft_config'):
-            # 这是一个 PEFT model
-            peft_model = model
-            
-            # 获取 AdaLoRA config
-            config_name = list(peft_model.peft_config.keys())[0]
-            peft_config = peft_model.peft_config[config_name]
-            
-            if hasattr(peft_config, 'rank_allocator') and peft_config.rank_allocator is not None:
-                # 调用 update_and_allocate
-                try:
-                    peft_config.rank_allocator.update_and_allocate(peft_model, global_step)
-                    
-                    # 记录 rank 分配
-                    if self.rank_logger and global_step % self.log_rank_every == 0:
-                        rank_info = self._get_rank_info(peft_model)
-                        
-                        self.rank_logger.write({
-                            "step": global_step,
-                            "ranks": rank_info["ranks"],
-                            "total_rank": rank_info["total_rank"],
-                            "num_modules": rank_info["num_modules"],
-                        })
-                        
-                        # 打印摘要
-                        logger.info(
-                            f"[AdaLoRA Update] Step {global_step}: "
-                            f"Total rank={rank_info['total_rank']}, "
-                            f"Active modules={rank_info['num_modules']}"
-                        )
+        if hasattr(model, "base_model") and hasattr(model.base_model, "update_and_allocate"):
+            try:
+                model.base_model.update_and_allocate(global_step)
                 
-                except Exception as e:
-                    logger.error(f"Error in update_and_allocate at step {global_step}: {e}")
+                peft_config, adapter_name = _get_peft_config(model)
+                rank_pattern = getattr(peft_config, "rank_pattern", None) if peft_config else None
+                init_r = getattr(peft_config, "init_r", None) if peft_config else None
+                
+                # 记录 rank 分配
+                if self.rank_logger and global_step % self.log_rank_every == 0:
+                    rank_info = _get_rank_info(
+                        model,
+                        rank_pattern=rank_pattern,
+                        adapter_name=adapter_name,
+                        init_r=init_r,
+                    )
+                    
+                    self.rank_logger.write({
+                        "step": global_step,
+                        "ranks": rank_info["ranks"],
+                        "total_rank": rank_info["total_rank"],
+                        "num_modules": rank_info["num_modules"],
+                    })
+                    
+                    # 打印摘要
+                    logger.info(
+                        f"[AdaLoRA Update] Step {global_step}: "
+                        f"Total rank={rank_info['total_rank']}, "
+                        f"Active modules={rank_info['num_modules']}"
+                    )
+            
+            except Exception as e:
+                logger.error(f"Error in update_and_allocate at step {global_step}: {e}")
         
         return control
-    
-    def _get_rank_info(self, model: torch.nn.Module) -> Dict:
-        """获取当前的 rank 分配信息"""
-        ranks = {}
-        total_rank = 0
-        num_modules = 0
-        
-        for name, module in model.named_modules():
-            if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
-                # 获取当前 rank
-                lora_A = module.lora_A['default']
-                current_rank = lora_A.weight.shape[0]
-                
-                # 清理名称
-                clean_name = name
-                if "base_model.model." in clean_name:
-                    clean_name = clean_name.replace("base_model.model.", "")
-                
-                ranks[clean_name] = current_rank
-                total_rank += current_rank
-                num_modules += 1
-        
-        return {
-            "ranks": ranks,
-            "total_rank": total_rank,
-            "num_modules": num_modules,
-        }
     
     def on_train_end(
         self,
@@ -165,7 +264,16 @@ class AdaLoRACallback(TrainerCallback):
     ):
         """训练结束时记录最终状态"""
         if model is not None:
-            final_rank_info = self._get_rank_info(model)
+            peft_config, adapter_name = _get_peft_config(model)
+            rank_pattern = getattr(peft_config, "rank_pattern", None) if peft_config else None
+            init_r = getattr(peft_config, "init_r", None) if peft_config else None
+            
+            final_rank_info = _get_rank_info(
+                model,
+                rank_pattern=rank_pattern,
+                adapter_name=adapter_name,
+                init_r=init_r,
+            )
             
             logger.info("=" * 50)
             logger.info("Final Rank Allocation:")
@@ -209,7 +317,7 @@ class BudgetConsistencyCallback(TrainerCallback):
         self.tolerance = tolerance
         self.budget_history = []
     
-    def on_step_end(
+    def on_optimizer_step(
         self,
         args: TrainingArguments,
         state: TrainerState,
@@ -219,23 +327,35 @@ class BudgetConsistencyCallback(TrainerCallback):
     ):
         """检查 budget"""
         if model is None:
-            return
+            return control
         
-        # 计算当前 total rank
-        total_rank = 0
-        for name, module in model.named_modules():
-            if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
-                lora_A = module.lora_A['default']
-                total_rank += lora_A.weight.shape[0]
+        global_step = state.global_step + 1
         
-        self.budget_history.append((state.global_step, total_rank))
+        peft_config, adapter_name = _get_peft_config(model)
+        rank_pattern = getattr(peft_config, "rank_pattern", None) if peft_config else None
+        init_r = getattr(peft_config, "init_r", None) if peft_config else None
+        rank_info = _get_rank_info(
+            model,
+            rank_pattern=rank_pattern,
+            adapter_name=adapter_name,
+            init_r=init_r,
+        )
+        total_rank = rank_info["total_rank"]
+        
+        # 初始化目标 budget
+        if self.target_budget is None and peft_config is not None:
+            num_modules = rank_info["num_modules"] or _count_lora_modules(model)
+            if num_modules > 0:
+                self.target_budget = peft_config.target_r * num_modules
+        
+        self.budget_history.append((global_step, total_rank))
         
         # 检查是否超出目标
         if self.target_budget is not None:
             deviation = abs(total_rank - self.target_budget) / self.target_budget
             if deviation > self.tolerance:
                 logger.warning(
-                    f"⚠️  Budget deviation at step {state.global_step}: "
+                    f"⚠️  Budget deviation at step {global_step}: "
                     f"current={total_rank}, target={self.target_budget}, "
                     f"deviation={deviation:.2%}"
                 )
@@ -275,7 +395,7 @@ if __name__ == "__main__":
     # 测试
     logging.basicConfig(level=logging.INFO)
     
-    from signal import SignalTracker
+    from signal_tracker import SignalTracker
     
     tracker = SignalTracker(signal_type="importance_only")
     callback = AdaLoRACallback(

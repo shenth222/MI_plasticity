@@ -15,7 +15,7 @@
 | `config.py` | 配置管理，支持 CLI 和配置文件 | ✓ 完成 |
 | `data.py` | GLUE MNLI/RTE 数据加载与预处理 | ✓ 完成 |
 | `modeling.py` | 模型加载与 AdaLoRA 应用 | ✓ 完成 |
-| `signal.py` | Scoring signals 计算（importance/plasticity/combo） | ✓ 完成 |
+| `signal_tracker.py` | Scoring signals 计算（importance/plasticity/combo） | ✓ 完成 |
 | `patch_adalora.py` | PEFT RankAllocator monkeypatch | ✓ 完成 |
 | `callbacks.py` | TrainerCallback（调用 update_and_allocate） | ✓ 完成 |
 | `logging_utils.py` | JSONL 日志记录与结果汇总 | ✓ 完成 |
@@ -335,7 +335,7 @@ grep "AdaLoRA Patched" outputs/.../training.log
 
 ### 1. 添加更多 signals
 
-编辑 `src/signal.py`，在 `SignalTracker` 中添加新的 signal 类型。
+编辑 `src/signal_tracker.py`，在 `SignalTracker` 中添加新的 signal 类型。
 
 ### 2. 支持更多任务
 

@@ -6,6 +6,7 @@
 import os
 import sys
 import logging
+import math
 import torch
 import numpy as np
 from transformers import Trainer, TrainingArguments, set_seed, AutoTokenizer
@@ -17,12 +18,11 @@ sys.path.insert(0, os.path.dirname(__file__))
 from config import parse_args, ExperimentConfig
 from data import prepare_datasets
 from modeling import load_base_model_and_tokenizer, create_adalora_model
-from signal import SignalTracker
-from callbacks import AdaLoRACallback, BudgetConsistencyCallback
+from signal_tracker import SignalTracker
+from callbacks import AdaLoRACallback, BudgetConsistencyCallback, MetricsWriterCallback
 from patch_adalora import apply_patch
 from logging_utils import (
     setup_experiment_logging,
-    MetricsLogger,
     create_final_summary,
     summarize_metrics,
     summarize_rank_pattern,
@@ -39,6 +39,28 @@ def compute_metrics(eval_pred):
     predictions = np.argmax(predictions, axis=1)
     
     return metric.compute(predictions=predictions, references=labels)
+
+
+def compute_total_steps(num_examples: int, config: ExperimentConfig) -> int:
+    """计算总训练步数（与 Trainer 逻辑一致）"""
+    if num_examples <= 0:
+        raise ValueError("Training dataset is empty, cannot compute total steps.")
+    
+    per_device_bs = config.training.per_device_train_batch_size
+    grad_accum = config.training.gradient_accumulation_steps
+    
+    if per_device_bs <= 0 or grad_accum <= 0:
+        raise ValueError("Batch size and gradient_accumulation_steps must be positive.")
+    
+    # len_dataloader = ceil(num_examples / per_device_bs)
+    len_dataloader = math.ceil(num_examples / per_device_bs)
+    num_update_steps_per_epoch = max(
+        len_dataloader // grad_accum + int(len_dataloader % grad_accum > 0),
+        1,
+    )
+    
+    total_steps = math.ceil(config.training.num_train_epochs * num_update_steps_per_epoch)
+    return total_steps
 
 
 def train(config: ExperimentConfig):
@@ -62,38 +84,57 @@ def train(config: ExperimentConfig):
     logger.info(f"Seed: {config.training.seed}")
     logger.info(f"Output dir: {config.training.output_dir}")
     
-    # 保存配置
-    config.save(os.path.join(config.training.output_dir, "config.json"))
-    
     # 1. 加载模型和 tokenizer
-    logger.info("\n[1/6] Loading model and tokenizer...")
+    logger.info("\n[1/7] Loading model and tokenizer...")
     base_model, tokenizer = load_base_model_and_tokenizer(
         config.model,
         num_labels=3 if config.data.task_name == "mnli" else 2,
     )
     
-    # 2. 应用 AdaLoRA
-    logger.info("\n[2/6] Applying AdaLoRA...")
-    model = create_adalora_model(base_model, config.adalora)
-    
-    # 3. 应用 patch（如果需要）
-    logger.info("\n[3/6] Applying AdaLoRA patch...")
-    apply_patch(config.signal.signal_type)
-    
-    # 4. 准备数据
-    logger.info("\n[4/6] Preparing datasets...")
+    # 2. 准备数据
+    logger.info("\n[2/7] Preparing datasets...")
     datasets, num_labels = prepare_datasets(
         config.data,
         tokenizer,
         cache_dir=config.model.cache_dir,
     )
     
-    # 5. 初始化 signal tracker（如果需要）
+    # 3. 计算总训练步数（AdaLoRA 必需）
+    logger.info("\n[3/7] Computing total training steps...")
+    computed_total_steps = compute_total_steps(len(datasets["train"]), config)
+    if config.adalora.total_step is None:
+        config.adalora.total_step = computed_total_steps
+    elif config.adalora.total_step != computed_total_steps:
+        logger.warning(
+            f"Using overridden total_step={config.adalora.total_step}, "
+            f"computed total_step={computed_total_steps} from current training setup."
+        )
+    logger.info(f"Total training steps: {config.adalora.total_step}")
+    
+    if config.adalora.tinit >= (config.adalora.total_step - config.adalora.tfinal):
+        raise ValueError(
+            "AdaLoRA schedule invalid: require tinit < total_step - tfinal. "
+            f"Got tinit={config.adalora.tinit}, tfinal={config.adalora.tfinal}, "
+            f"total_step={config.adalora.total_step}."
+        )
+    
+    # 保存配置（含 total_step）
+    config.save(os.path.join(config.training.output_dir, "config.json"))
+    
+    # 4. 应用 AdaLoRA
+    logger.info("\n[4/7] Applying AdaLoRA...")
+    model = create_adalora_model(base_model, config.adalora)
+    
+    # 5. 应用 patch（如果需要）
+    logger.info("\n[5/7] Applying AdaLoRA patch...")
+    apply_patch(config.signal.signal_type)
+    
+    # 6. 初始化 signal tracker（如果需要）
     signal_tracker = None
     use_external_scores = config.signal.signal_type != "baseline_adalora"
     
     if use_external_scores:
-        logger.info("\n[5/6] Initializing signal tracker...")
+        logger.info("\n[6/7] Initializing signal tracker...")
         signal_tracker = SignalTracker(
             signal_type=config.signal.signal_type,
             ema_decay=config.signal.ema_decay,
@@ -101,10 +142,10 @@ def train(config: ExperimentConfig):
             normalize_method=config.signal.normalize_method,
         )
     else:
-        logger.info("\n[5/6] Using baseline AdaLoRA (no signal tracker)")
+        logger.info("\n[6/7] Using baseline AdaLoRA (no signal tracker)")
     
-    # 6. 设置 Trainer
-    logger.info("\n[6/6] Setting up Trainer...")
+    # 7. 设置 Trainer
+    logger.info("\n[7/7] Setting up Trainer...")
     
     training_args = TrainingArguments(
         output_dir=config.training.output_dir,
@@ -123,7 +164,7 @@ def train(config: ExperimentConfig):
         adam_epsilon=config.training.adam_epsilon,
         fp16=config.training.fp16,
         bf16=config.training.bf16,
-        evaluation_strategy=config.training.evaluation_strategy,
+        eval_strategy=config.training.evaluation_strategy,
         save_strategy=config.training.save_strategy,
         save_total_limit=config.training.save_total_limit,
         load_best_model_at_end=config.training.load_best_model_at_end,
@@ -141,6 +182,7 @@ def train(config: ExperimentConfig):
     
     # Callbacks
     callbacks = [
+        MetricsWriterCallback(metrics_logger=writers["metrics"]),
         AdaLoRACallback(
             signal_tracker=signal_tracker,
             rank_logger=writers["rank_pattern"],
@@ -150,7 +192,6 @@ def train(config: ExperimentConfig):
             use_external_scores=use_external_scores,
         ),
         BudgetConsistencyCallback(
-            target_budget=config.adalora.target_r * 144,  # 假设 144 个 modules
             tolerance=0.1,
         ),
     ]
@@ -176,6 +217,8 @@ def train(config: ExperimentConfig):
     # 8. 保存模型
     logger.info("\nSaving model...")
     trainer.save_model()
+    if tokenizer is not None:
+        tokenizer.save_pretrained(config.training.output_dir)
     
     # 9. 最终评估
     logger.info("\nRunning final evaluation...")
@@ -240,7 +283,11 @@ def evaluate(config: ExperimentConfig):
     model = PeftModel.from_pretrained(base_model, checkpoint_dir)
     
     # 加载 tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
+    except Exception:
+        logger.warning("Tokenizer not found in checkpoint, falling back to base model tokenizer.")
+        tokenizer = AutoTokenizer.from_pretrained(config.model.model_name_or_path)
     
     # 准备数据
     datasets, _ = prepare_datasets(config.data, tokenizer)

@@ -5,6 +5,7 @@ AdaLoRA Patching 模块
 
 import logging
 from typing import Dict, Optional
+import torch
 import peft
 from packaging import version
 
@@ -40,6 +41,63 @@ def set_external_scores(scores: Dict[str, float]):
 def get_external_scores() -> Optional[Dict[str, float]]:
     """获取外部 scores"""
     return _EXTERNAL_SCORES
+
+
+def _match_external_score(param_name: str) -> Optional[float]:
+    """匹配参数名到外部 scores"""
+    if _EXTERNAL_SCORES is None:
+        return None
+    
+    for ext_name, score in _EXTERNAL_SCORES.items():
+        if ext_name in param_name or param_name.endswith(ext_name):
+            return float(score)
+    
+    return None
+
+
+def patch_rank_allocator_element_score(use_external_scores: bool = True):
+    """
+    在 RankAllocator._element_score 层面注入外部 scores
+    
+    这样可以保持 AdaLoRA 原始的预算调度与 mask_to_budget 逻辑不变。
+    """
+    if not check_peft_version():
+        logger.warning("Patching with incompatible PEFT version!")
+    
+    try:
+        from peft.tuners.adalora import RankAllocator
+    except ImportError:
+        logger.error("Cannot import RankAllocator from peft.tuners.adalora")
+        raise
+    
+    if hasattr(RankAllocator, "_original_element_score"):
+        logger.info("RankAllocator already patched, skipping...")
+        return
+    
+    original_element_score = RankAllocator._element_score
+    
+    def patched_element_score(self, n):
+        if not use_external_scores or _EXTERNAL_SCORES is None:
+            return original_element_score(self, n)
+        
+        score = _match_external_score(n)
+        if score is None:
+            return original_element_score(self, n)
+        
+        ref = None
+        if hasattr(self, "exp_avg_ipt") and n in self.exp_avg_ipt:
+            ref = self.exp_avg_ipt[n]
+        elif hasattr(self, "ipt") and n in self.ipt:
+            ref = self.ipt[n]
+        
+        if ref is None:
+            return original_element_score(self, n)
+        
+        return torch.full_like(ref, score)
+    
+    RankAllocator._original_element_score = original_element_score
+    RankAllocator._element_score = patched_element_score
+    logger.info("RankAllocator._element_score patched successfully!")
 
 
 def patch_rank_allocator(use_external_scores: bool = True):
@@ -243,6 +301,10 @@ def unpatch_rank_allocator():
     if hasattr(RankAllocator, '_original_compute_importance'):
         RankAllocator._compute_importance = RankAllocator._original_compute_importance
         delattr(RankAllocator, '_original_compute_importance')
+    
+    if hasattr(RankAllocator, '_original_element_score'):
+        RankAllocator._element_score = RankAllocator._original_element_score
+        delattr(RankAllocator, '_original_element_score')
 
 
 def apply_patch(signal_type: str):
@@ -258,7 +320,7 @@ def apply_patch(signal_type: str):
     
     logger.info(f"Applying AdaLoRA patch for signal_type={signal_type}")
     check_peft_version()
-    patch_rank_allocator_simple()
+    patch_rank_allocator_element_score()
 
 
 if __name__ == "__main__":

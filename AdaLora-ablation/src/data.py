@@ -46,12 +46,12 @@ def load_glue_data(
     
     # 加载数据集
     if task_name == "mnli":
-        dataset = load_dataset("glue", "mnli", cache_dir=cache_dir)
+        dataset = load_dataset("/data1/shenth/datasets/glue", "mnli", cache_dir=cache_dir)
         # MNLI 有 matched 和 mismatched 两个验证集
         # 使用 validation_matched 作为主验证集
         dataset["validation"] = dataset["validation_matched"]
     else:
-        dataset = load_dataset("glue", task_name, cache_dir=cache_dir)
+        dataset = load_dataset("/data1/shenth/datasets/glue", task_name, cache_dir=cache_dir)
     
     logger.info(f"Dataset loaded: {dataset}")
     

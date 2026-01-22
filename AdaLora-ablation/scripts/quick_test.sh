@@ -18,7 +18,7 @@ python src/main.py \
     --task mnli \
     --signal baseline_adalora \
     --seed 42 \
-    --model_path /data1/shenth/models/deberta-v3-base \
+    --model_path /data1/shenth/models/deberta/v3-base \
     --output_dir ./outputs/test \
     --init_r 8 \
     --target_r 4 \
