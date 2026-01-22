@@ -3,11 +3,11 @@
 # Usage: bash scripts/measure_mnli.sh [seed]
 
 SEED=${1:-1}
-TASK="MNLI"
+TASK=${2:-"MNLI"}
 OUT_DIR="outputs/${TASK}/seed${SEED}"
 
 echo "======================================"
-echo "Measuring Importance & Plasticity (seed=${SEED})"
+echo "Measuring Importance & Plasticity (seed=${SEED}, task=${TASK})"
 echo "======================================"
 
 # Check if training is done

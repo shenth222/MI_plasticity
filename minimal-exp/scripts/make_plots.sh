@@ -3,11 +3,11 @@
 # Usage: bash scripts/make_plots.sh [seed]
 
 SEED=${1:-1}
-TASK="MNLI"
+TASK=${2:-"MNLI"}
 OUT_DIR="outputs/${TASK}/seed${SEED}"
 
 echo "======================================"
-echo "Aggregating results and making plots (seed=${SEED})"
+echo "Aggregating results and making plots (seed=${SEED}, task=${TASK})"
 echo "======================================"
 
 # Step 1: Aggregate jsonl files into CSV + stats + cases

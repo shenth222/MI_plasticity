@@ -17,8 +17,8 @@ python -m src.train.finetune_glue \
     --out_dir ${OUT_DIR} \
     --seed ${SEED} \
     --max_len 256 \
-    --lr 2e-5 \
-    --epochs 3 \
+    --lr 1e-5 \
+    --epochs 20 \
     --bsz 128
 
 echo ""

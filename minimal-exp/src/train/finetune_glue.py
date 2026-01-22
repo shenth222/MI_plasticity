@@ -3,6 +3,7 @@ import os, json, argparse
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments, Trainer
 from src.data.glue import load_glue_dataset
+import wandb
 
 def main():
     ap = argparse.ArgumentParser()
@@ -18,6 +19,7 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     torch.manual_seed(args.seed)
+    wandb.init(project="minimal-exp", name=f"{args.task}-seed{args.seed}")
 
     tok = AutoTokenizer.from_pretrained(args.model_name, use_fast=False)
     ds = load_glue_dataset(args.task, tok, max_len=args.max_len)
@@ -38,7 +40,8 @@ def main():
             use_bf16 = True
         else:
             use_fp16 = True
-    
+
+    # 增加 logging_steps 保证 loss 日志能被 Trainer 定期记录到 wandb
     train_args = TrainingArguments(
         output_dir=os.path.join(args.out_dir, "trainer_out"),
         per_device_train_batch_size=args.bsz,
@@ -52,7 +55,10 @@ def main():
         seed=args.seed,
         bf16=use_bf16,
         fp16=use_fp16,
-        report_to=[],
+        report_to=["wandb"],
+        logging_strategy="steps",    # 确保 log 在步骤执行
+        logging_steps=10,            # 每 10 步记录一次 loss 到 wandb
+        logging_first_step=True      # 确保一开始就有 loss log
     )
 
     trainer = Trainer(
