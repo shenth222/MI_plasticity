@@ -100,6 +100,55 @@ def patch_rank_allocator_element_score(use_external_scores: bool = True):
     logger.info("RankAllocator._element_score patched successfully!")
 
 
+def patch_adalora_zero_rank_guard():
+    """
+    Patch SVDLinear.forward to safely skip zero-rank adapters.
+    
+    PEFT AdaLoRA allows r=0, but some versions error on matmul with empty ranks.
+    """
+    try:
+        from peft.tuners.adalora.layer import SVDLinear
+    except ImportError:
+        logger.error("Cannot import SVDLinear from peft.tuners.adalora.layer")
+        raise
+    
+    if hasattr(SVDLinear, "_original_forward"):
+        logger.info("SVDLinear already patched, skipping...")
+        return
+    
+    original_forward = SVDLinear.forward
+    
+    def patched_forward(self, x, *args, **kwargs):
+        if self.disable_adapters:
+            if self.merged:
+                self.unmerge()
+            return self.base_layer(x, *args, **kwargs)
+        if self.merged:
+            return self.base_layer(x, *args, **kwargs)
+        
+        result = self.base_layer(x, *args, **kwargs)
+        for active_adapter in self.active_adapters:
+            if active_adapter not in self.lora_A.keys():
+                continue
+            lora_A = self.lora_A[active_adapter]
+            lora_B = self.lora_B[active_adapter]
+            lora_E = self.lora_E[active_adapter]
+            if lora_A.numel() == 0 or lora_B.numel() == 0 or lora_E.numel() == 0:
+                continue
+            dropout = self.lora_dropout[active_adapter]
+            scaling = self.scaling[active_adapter]
+            ranknum = self.ranknum[active_adapter] + 1e-5
+            
+            x = self._cast_input_dtype(x, lora_A.dtype)
+            result += (dropout(x) @ (lora_A * lora_E).T @ lora_B.T) * scaling / ranknum
+        
+        return result
+    
+    SVDLinear._original_forward = original_forward
+    SVDLinear.forward = patched_forward
+    logger.info("SVDLinear.forward patched with zero-rank guard.")
+
+
 def patch_rank_allocator(use_external_scores: bool = True):
     """
     Monkeypatch PEFT 的 RankAllocator
@@ -314,6 +363,7 @@ def apply_patch(signal_type: str):
     Args:
         signal_type: baseline_adalora 不 patch，其他类型需要 patch
     """
+    patch_adalora_zero_rank_guard()
     if signal_type == "baseline_adalora":
         logger.info("Using baseline AdaLoRA (no patching)")
         return

@@ -26,7 +26,7 @@ python src/main.py \
     --tfinal 20 \
     --deltaT 5 \
     --epochs 1 \
-    --batch_size 8 \
+    --batch_size 128 \
     --learning_rate 1e-5 \
     --bf16
 

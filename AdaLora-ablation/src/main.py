@@ -10,7 +10,7 @@ import math
 import torch
 import numpy as np
 from transformers import Trainer, TrainingArguments, set_seed, AutoTokenizer
-import evaluate
+import evaluate as hf_evaluate
 
 # 添加当前目录到 Python path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 def compute_metrics(eval_pred):
     """计算评估指标"""
-    metric = evaluate.load("accuracy")
+    metric = hf_evaluate.load("accuracy")
     
     predictions, labels = eval_pred
     predictions = np.argmax(predictions, axis=1)
@@ -256,7 +256,7 @@ def train(config: ExperimentConfig):
     return train_result, eval_results
 
 
-def evaluate(config: ExperimentConfig):
+def run_evaluate(config: ExperimentConfig):
     """
     评估模型
     
@@ -264,6 +264,9 @@ def evaluate(config: ExperimentConfig):
         config: 实验配置
     """
     logger.info("Loading model for evaluation...")
+    
+    # Ensure AdaLoRA forward is safe with zero-rank adapters
+    apply_patch(config.signal.signal_type)
     
     # 加载 checkpoint
     checkpoint_dir = config.training.output_dir
@@ -355,7 +358,7 @@ def main():
     if mode == "train":
         train(config)
     elif mode == "eval":
-        evaluate(config)
+        run_evaluate(config)
     elif mode == "export":
         export_results(config)
     else:
