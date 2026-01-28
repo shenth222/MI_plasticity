@@ -4,3 +4,5 @@ torch==2.9.1
 numpy
 matplotlib
 accelerate
+peft>=0.7.0
+scipy

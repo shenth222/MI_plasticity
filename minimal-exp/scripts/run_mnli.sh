@@ -3,12 +3,12 @@
 # Usage: bash scripts/run_mnli.sh [seed]
 
 SEED=${1:-1}
-TASK="RTE"
+TASK=${2:-"RTE"}
 MODEL="/data1/shenth/models/deberta/v3-base"
-OUT_DIR="outputs/${TASK}/seed${SEED}"
+OUT_DIR="outputs/FFT/${TASK}/seed${SEED}"
 
 echo "======================================"
-echo "Training DeBERTa on ${TASK} (seed=${SEED})"
+echo "Training DeBERTa with FFT on ${TASK} (seed=${SEED})"
 echo "======================================"
 
 python -m src.train.finetune_glue \
