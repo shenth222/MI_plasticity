@@ -52,8 +52,16 @@ def compute_total_steps(num_examples: int, config: ExperimentConfig) -> int:
     if per_device_bs <= 0 or grad_accum <= 0:
         raise ValueError("Batch size and gradient_accumulation_steps must be positive.")
     
-    # len_dataloader = ceil(num_examples / per_device_bs)
-    len_dataloader = math.ceil(num_examples / per_device_bs)
+    world_size = 1
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        # print("DDP")
+        world_size = torch.distributed.get_world_size()
+    # print("world_size", world_size)
+    # print("os world size", os.environ.get("WORLD_SIZE"))
+    effective_bs = per_device_bs * world_size
+    
+    # len_dataloader = ceil(num_examples / (per_device_bs * world_size))
+    len_dataloader = math.ceil(num_examples / effective_bs)
     num_update_steps_per_epoch = max(
         len_dataloader // grad_accum + int(len_dataloader % grad_accum > 0),
         1,
