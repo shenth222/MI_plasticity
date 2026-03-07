@@ -28,6 +28,17 @@ GLUE_TASK_CONFIGS = {
         "num_labels": 2,
         "metric_for_best_model": "accuracy",
     },
+    "MRPC": {
+        "dataset_name": "glue",
+        "subset_name": "mrpc",
+        "train_split": "train",
+        "eval_split": "validation",
+        "sentence1_key": "sentence1",
+        "sentence2_key": "sentence2",
+        "label_key": "label",
+        "num_labels": 2,
+        "metric_for_best_model": "accuracy",
+    },
 }
 
 # Tokenization function

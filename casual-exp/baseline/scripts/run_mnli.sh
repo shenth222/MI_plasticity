@@ -11,14 +11,14 @@ echo "======================================"
 echo "Training DeBERTa with FFT on ${TASK} (seed=${SEED})"
 echo "======================================"
 
-python -m train.finetune_glue \
+accelerate launch --num_processes=4 -m train.finetune_glue \
     --task ${TASK} \
     --model_name ${MODEL} \
     --out_dir ${OUT_DIR} \
     --seed ${SEED} \
     --max_len 256 \
     --lr 1e-5 \
-    --epochs 20 \
+    --epochs 10 \
     --bsz 128
 
 echo ""
