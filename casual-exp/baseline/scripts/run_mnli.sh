@@ -1,0 +1,27 @@
+#!/bin/bash
+# scripts/run_mnli.sh
+# Usage: bash scripts/run_mnli.sh [seed]
+
+SEED=${1:-1}
+TASK=${2:-"RTE"}
+MODEL="/data1/shenth/models/deberta/v3-base"
+OUT_DIR="outputs/FFT/${TASK}/seed${SEED}"
+
+echo "======================================"
+echo "Training DeBERTa with FFT on ${TASK} (seed=${SEED})"
+echo "======================================"
+
+python -m train.finetune_glue \
+    --task ${TASK} \
+    --model_name ${MODEL} \
+    --out_dir ${OUT_DIR} \
+    --seed ${SEED} \
+    --max_len 256 \
+    --lr 1e-5 \
+    --epochs 20 \
+    --bsz 128
+
+echo ""
+echo "Training complete. Checkpoints saved to:"
+echo "  θ0: ${OUT_DIR}/ckpt_init"
+echo "  θ1: ${OUT_DIR}/ckpt_final"
