@@ -66,6 +66,22 @@ def _get_peft_config(model: torch.nn.Module):
     return None, None
 
 
+def _call_update_and_allocate(model: torch.nn.Module, global_step: int) -> Optional[str]:
+    """
+    尝试调用 AdaLoRA 的 update_and_allocate，并返回调用路径名称
+    """
+    if hasattr(model, "update_and_allocate"):
+        model.update_and_allocate(global_step)
+        return "model.update_and_allocate"
+    if hasattr(model, "base_model") and hasattr(model.base_model, "update_and_allocate"):
+        model.base_model.update_and_allocate(global_step)
+        return "model.base_model.update_and_allocate"
+    if hasattr(model, "model") and hasattr(model.model, "update_and_allocate"):
+        model.model.update_and_allocate(global_step)
+        return "model.model.update_and_allocate"
+    return None
+
+
 def _get_rank_info(
     model: torch.nn.Module,
     rank_pattern: Optional[Dict] = None,
@@ -218,39 +234,44 @@ class AdaLoRACallback(TrainerCallback):
         global_step = state.global_step + 1
         
         # 2. 调用 AdaLoRA 的 update_and_allocate
-        if hasattr(model, "base_model") and hasattr(model.base_model, "update_and_allocate"):
-            try:
-                model.base_model.update_and_allocate(global_step)
-                
-                peft_config, adapter_name = _get_peft_config(model)
-                rank_pattern = getattr(peft_config, "rank_pattern", None) if peft_config else None
-                init_r = getattr(peft_config, "init_r", None) if peft_config else None
-                
-                # 记录 rank 分配
-                if self.rank_logger and global_step % self.log_rank_every == 0:
-                    rank_info = _get_rank_info(
-                        model,
-                        rank_pattern=rank_pattern,
-                        adapter_name=adapter_name,
-                        init_r=init_r,
-                    )
-                    
-                    self.rank_logger.write({
-                        "step": global_step,
-                        "ranks": rank_info["ranks"],
-                        "total_rank": rank_info["total_rank"],
-                        "num_modules": rank_info["num_modules"],
-                    })
-                    
-                    # 打印摘要
-                    logger.info(
-                        f"[AdaLoRA Update] Step {global_step}: "
-                        f"Total rank={rank_info['total_rank']}, "
-                        f"Active modules={rank_info['num_modules']}"
-                    )
+        try:
+            call_path = _call_update_and_allocate(model, global_step)
+            if call_path is None:
+                logger.warning(
+                    f"[AdaLoRA Update] Step {global_step}: update_and_allocate not found on model."
+                )
+                return control
             
-            except Exception as e:
-                logger.error(f"Error in update_and_allocate at step {global_step}: {e}")
+            peft_config, adapter_name = _get_peft_config(model)
+            rank_pattern = getattr(peft_config, "rank_pattern", None) if peft_config else None
+            init_r = getattr(peft_config, "init_r", None) if peft_config else None
+            
+            # 记录 rank 分配
+            if self.rank_logger and global_step % self.log_rank_every == 0:
+                rank_info = _get_rank_info(
+                    model,
+                    rank_pattern=rank_pattern,
+                    adapter_name=adapter_name,
+                    init_r=init_r,
+                )
+                
+                self.rank_logger.write({
+                    "step": global_step,
+                    "ranks": rank_info["ranks"],
+                    "total_rank": rank_info["total_rank"],
+                    "num_modules": rank_info["num_modules"],
+                })
+                
+                # 打印摘要
+                logger.info(
+                    f"[AdaLoRA Update] Step {global_step}: "
+                    f"Total rank={rank_info['total_rank']}, "
+                    f"Active modules={rank_info['num_modules']}, "
+                    f"call={call_path}"
+                )
+        
+        except Exception as e:
+            logger.error(f"Error in update_and_allocate at step {global_step}: {e}")
         
         return control
     

@@ -58,7 +58,9 @@ def compute_total_steps(num_examples: int, config: ExperimentConfig) -> int:
         world_size = torch.distributed.get_world_size()
     # print("world_size", world_size)
     # print("os world size", os.environ.get("WORLD_SIZE"))
-    effective_bs = per_device_bs * world_size
+        effective_bs = per_device_bs * world_size
+    else:
+        effective_bs = per_device_bs * torch.cuda.device_count()
     
     # len_dataloader = ceil(num_examples / (per_device_bs * world_size))
     len_dataloader = math.ceil(num_examples / effective_bs)
