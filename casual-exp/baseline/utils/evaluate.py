@@ -343,7 +343,6 @@ def evaluate_glue(
     tokenizer: Optional[PreTrainedTokenizerBase] = None,
     task_name: str = "mnli",
     dataset_path: str = "",
-    *,
     max_length: int = 256,
     batch_size: int = 16,
     device: Optional[Union[str, torch.device]] = None,
@@ -421,17 +420,18 @@ def evaluate_glue(
             compute_metrics_fn,
         )
         if task == "mnli":
-            if "matched" in split_name:
-                results["accuracy_matched"] = metrics["accuracy"]
-            elif "mismatched" in split_name:
+            if "mismatched" in split_name:
                 results["accuracy_mismatched"] = metrics["accuracy"]
+            elif "matched" in split_name:
+                results["accuracy_matched"] = metrics["accuracy"]
             # 主指标用 matched 作为 accuracy
-            if "accuracy_matched" in results:
+            if "accuracy_matched" and "accuracy_mismatched" in results:
+                results["accuracy"] = (results["accuracy_matched"]+results["accuracy_mismatched"])/2
+            elif "accuracy_matched" in results:
                 results["accuracy"] = results["accuracy_matched"]
         else:
             for k, v in metrics.items():
                 results[k] = v
-
     return results
 
 

@@ -12,7 +12,7 @@ from typing import Dict, Any, List, Optional
 # 项目根为 casual-exp 时可直接 import utils
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.evaluate import GLUE_TASK_CONFIGS, evaluate_glue
+from baseline.utils.evaluate import GLUE_TASK_CONFIGS, evaluate_glue
 
 
 # ---------- 配置：本地模型与 GLUE 数据路径 ----------
@@ -20,7 +20,7 @@ LOCAL_MODEL_PATH = "/data1/shenth/models/deberta/v3-base"   # 本地模型/check
 LOCAL_GLUE_PATH = "/data1/shenth/datasets/glue"   # 本地 GLUE 数据根目录，例如: "/data1/shenth/datasets/glue"
 
 # 要评估的子任务（默认全部）；若某任务无对应模型会跳过
-TASKS: List[str] = list(GLUE_TASK_CONFIGS.keys())   # cola, sst2, mrpc, stsb, qqp, mnli, qnli, rte, wnli
+TASKS: List[str] = ["mnli"] # list(GLUE_TASK_CONFIGS.keys())   # cola, sst2, mrpc, stsb, qqp, mnli, qnli, rte, wnli
 
 # 评估超参
 BATCH_SIZE = 16
