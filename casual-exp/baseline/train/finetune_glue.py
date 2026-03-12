@@ -119,12 +119,11 @@ def main():
         seed=args.seed,
         bf16=use_bf16,
         fp16=use_fp16,
-        report_to=["wandb"],
-        run_name=f"FFT-baseline-{args.task}-seed{args.seed}-lr{args.lr}",
-        logging_strategy="steps",
-        logging_steps=1,
-        logging_first_step=True,
-        # torch_compile=True
+        # report_to=["wandb"],
+        # run_name=f"FFT-baseline-{args.task}-seed{args.seed}-lr{args.lr}",
+        # logging_strategy="steps",
+        # logging_steps=1,
+        # logging_first_step=True
     )
 
     eval_callback = GlueEvalCallback(
