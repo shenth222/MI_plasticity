@@ -3,7 +3,7 @@
 # Usage: bash scripts/run_mnli.sh [seed]
 
 SEED=${1:-1}
-TASK=${2:-"RTE"}
+TASK=${2:-"MNLI"}
 LR=${3:-"1e-5"}
 MODEL="/data1/shenth/models/deberta/v3-base"
 OUT_DIR="baseline/outputs/FFT/${TASK}/seed${SEED}/lr${LR}"
