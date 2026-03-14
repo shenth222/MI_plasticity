@@ -3,6 +3,7 @@ import os, json, argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
+from scipy.stats import spearmanr, pearsonr
 
 # Use a clean style without seaborn
 rcParams['font.size'] = 10
@@ -302,6 +303,58 @@ def plot_bucket_orthogonality(data, out_path_prefix, P_col="Urel", n_buckets=10,
     print(f"Saved {out_path}")
 
 
+def plot_U_vs_Ppred(data, out_path, U_col="Urel"):
+    """
+    Scatter plot: Ppred (plasticity prediction) vs. actual update magnitude (U or Urel).
+    理论上，可塑性预测 Ppred 越高，实际更新量也应越大；
+    该图用于验证这一假设是否成立。
+    - 绘制散点图及 OLS 拟合线
+    - 标注 Spearman ρ 和 Pearson r
+    """
+    fig, ax = plt.subplots(figsize=(6, 5))
+
+    Ppred = np.asarray(data["Ppred"], dtype=float)
+    U = np.asarray(data[U_col], dtype=float)
+
+    valid = ~np.isnan(Ppred) & ~np.isnan(U)
+    Ppred_v = Ppred[valid]
+    U_v = U[valid]
+
+    if len(Ppred_v) < 2:
+        print(f"Skip {out_path}: too few valid points")
+        plt.close()
+        return
+
+    ax.scatter(Ppred_v, U_v, s=20, alpha=0.55, marker='o', label='Heads')
+
+    # OLS fit line
+    coeffs = np.polyfit(Ppred_v, U_v, 1)
+    x_line = np.linspace(Ppred_v.min(), Ppred_v.max(), 200)
+    ax.plot(x_line, np.polyval(coeffs, x_line),
+            color='tomato', linewidth=1.5, linestyle='--', label='OLS fit')
+
+    # Correlation statistics
+    rho, p_sp = spearmanr(Ppred_v, U_v)
+    r, p_pe = pearsonr(Ppred_v, U_v)
+
+    text = (f"Spearman ρ = {rho:.3f} (p={p_sp:.2e})\n"
+            f"Pearson  r = {r:.3f}  (p={p_pe:.2e})")
+    ax.text(0.03, 0.97, text, transform=ax.transAxes,
+            fontsize=8.5, va='top', ha='left',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+
+    ax.set_xlabel('Plasticity Prediction (Ppred)')
+    ax.set_ylabel(f'Actual Update Magnitude ({U_col})')
+    ax.set_title(f'Plasticity Prediction vs. Actual Update ({U_col})')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"Saved {out_path}")
+
+
 def plot_Ipost_correlations(stats, out_path):
     """
     Bar plot: Spearman correlations between I_post and {U, Urel, G, F, Ppred}.
@@ -374,8 +427,9 @@ def main():
     plot_stats(stats, os.path.join(args.exp_dir, "fig_stats.png"))
     plot_I_pre_vs_I_post(data, os.path.join(args.exp_dir, "fig_Ipre_vs_Ipost.png"))
     plot_Ipost_correlations(stats, os.path.join(args.exp_dir, "fig_Ipost_corrs.png"))
+    plot_U_vs_Ppred(data, os.path.join(args.exp_dir, "fig_U_vs_Ppred.png"), U_col=args.P_col)
 
-    # 分桶图：反驳“相关性低=噪声/尺度”，说明 I 与 P 正交
+    # 分桶图：反驳"相关性低=噪声/尺度"，说明 I 与 P 正交
     out_prefix = os.path.join(args.exp_dir, "fig")
     plot_bucket_orthogonality(
         data,
