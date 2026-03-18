@@ -2,7 +2,7 @@
 # scripts/run_mnli.sh
 # Usage: bash scripts/run_mnli.sh [seed]
 
-SEED=${1:-1}
+SEED=${1:-42}
 TASK=${2:-"MNLI"}
 LR=${3:-"1e-5"}
 MODEL="/data1/shenth/models/deberta/v3-base"
@@ -23,7 +23,8 @@ accelerate launch --num_processes=4 -m score.pre_importance.finetune_glue_I_pre 
     --bsz 64 \
     --pre_importance fisher,saliency,perturbation,singular_value,spectral_entropy \
     --pre_importance_batches 32 \
-    --pre_importance_perturb_batches 4
+    --pre_importance_perturb_batches 4 \
+    --pre_importance_head_granularity
 
 echo ""
 echo "Training complete. Checkpoints saved to:"

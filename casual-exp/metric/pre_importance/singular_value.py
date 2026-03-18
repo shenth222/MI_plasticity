@@ -10,9 +10,10 @@ metric/pre_importance/singular_value.py
 对每个含 2D+ 权重矩阵的叶模块执行 SVD，同时计算两种变体。
 高维权重（如 Conv）展平为 [out_channels, -1] 后再做 SVD。
 
-含义：
-  核范数反映矩阵在所有方向上的"信息量"总和；
-  前 k 个奇异值聚焦于主要特征方向，过滤掉尾部噪声奇异值。
+头级别扩展（head_granularity=True）：
+    对注意力模块，对每个头的权重子矩阵分别执行 SVD，
+    计算头级别的核范数和前 k 奇异值之和。
+    各头子矩阵形状为 [head_dim, hidden_size]（QKV）或 [hidden_size, head_dim]（OUT）。
 
 此指标不依赖数据集，纯参数统计，计算快。
 
@@ -21,24 +22,36 @@ metric/pre_importance/singular_value.py
     {
       "module_scores": {
         module_name: {
-          "nuclear_norm":   float,   # 全部奇异值之和
-          "top{k}_sum":     float,   # 前 k 奇异值之和
+          "nuclear_norm":   float,
+          "top{k}_sum":     float,
           "max_sv":         float,
           "min_sv":         float,
           "num_singular_values": int,
           "matrix_shape":   [int, int]
         }, ...
       },
-      "top_k": int
+      "top_k": int,
+      "head_scores": {                             # 仅 head_granularity=True 时存在
+        module_name: {
+          "head_0": {"nuclear_norm": float, "top{k}_sum": float, ...},
+          ...
+        }, ...
+      }
     }
 """
 
+import math
 from typing import Any, Dict, Optional
 
 import torch
 from torch.utils.data import DataLoader
 
 from .base import ImportanceBase
+from .attn_head import (
+    get_attn_head_config,
+    get_attn_modules,
+    compute_head_svd_scores,
+)
 
 
 class SingularValueImportance(ImportanceBase):
@@ -57,12 +70,13 @@ class SingularValueImportance(ImportanceBase):
         dataloader: Optional[DataLoader] = None,
         device: Optional[torch.device] = None,
         top_k: int = 32,
+        head_granularity: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
         """
         Args:
-            top_k: 前 k 个奇异值的截断数。
-                   若模块实际奇异值个数 < top_k，则取全部（不补零）。
+            top_k:            前 k 个奇异值的截断数（若模块实际奇异值数 < k 则取全部）。
+            head_granularity: 若为 True，对注意力模块额外计算每头的奇异值指标。
         """
         module_scores: Dict[str, Any] = {}
 
@@ -72,13 +86,11 @@ class SingularValueImportance(ImportanceBase):
                 continue
 
             W = weight.detach().float()
-            # Conv 等高维张量展平为 [out, -1]
             if W.dim() > 2:
                 W = W.view(W.size(0), -1)
 
             try:
-                # torch.linalg.svdvals 仅计算奇异值（比完整 SVD 快）
-                sv = torch.linalg.svdvals(W)   # 降序排列，形状 [min(m,n)]
+                sv = torch.linalg.svdvals(W)
             except Exception as e:
                 print(f"  [singular_value] SVD failed for {module_name}: {e}")
                 continue
@@ -87,15 +99,45 @@ class SingularValueImportance(ImportanceBase):
             k_actual = min(top_k, r)
 
             module_scores[module_name] = {
-                "nuclear_norm":          sv.sum().item(),
-                f"top{top_k}_sum":       sv[:k_actual].sum().item(),
-                "max_sv":                sv[0].item() if r > 0 else 0.0,
-                "min_sv":                sv[-1].item() if r > 0 else 0.0,
-                "num_singular_values":   r,
-                "matrix_shape":          list(W.shape),
+                "nuclear_norm":        sv.sum().item(),
+                f"top{top_k}_sum":     sv[:k_actual].sum().item(),
+                "max_sv":              sv[0].item() if r > 0 else 0.0,
+                "min_sv":              sv[-1].item() if r > 0 else 0.0,
+                "num_singular_values": r,
+                "matrix_shape":        list(W.shape),
             }
 
-        return {
+        result: Dict[str, Any] = {
             "module_scores": module_scores,
-            "top_k": top_k,
+            "top_k":         top_k,
         }
+
+        # ── 头级别扩展（各头子矩阵的 SVD，无额外数据）──────────────────────
+        if head_granularity:
+            attn_cfg = get_attn_head_config(model)
+            if attn_cfg is None:
+                print("  [singular_value] head_granularity=True 但模型无 config，跳过")
+            else:
+                attn_mods = get_attn_modules(model, attn_cfg)
+
+                def _sv_metric(W_h: torch.Tensor) -> Dict[str, Any]:
+                    sv_h = torch.linalg.svdvals(W_h)
+                    r_h = sv_h.numel()
+                    k_h = min(top_k, r_h)
+                    return {
+                        "nuclear_norm":        sv_h.sum().item(),
+                        f"top{top_k}_sum":     sv_h[:k_h].sum().item(),
+                        "max_sv":              sv_h[0].item() if r_h > 0 else 0.0,
+                        "min_sv":              sv_h[-1].item() if r_h > 0 else 0.0,
+                        "num_singular_values": r_h,
+                        "matrix_shape":        list(W_h.shape),
+                    }
+
+                result["head_scores"] = compute_head_svd_scores(
+                    model, attn_cfg, attn_mods, _sv_metric
+                )
+                print(f"  [singular_value] 计算了 {len(attn_mods)} 个注意力模块的头级别奇异值"
+                      f"（每模块 {attn_cfg.num_heads} 头）")
+        # ─────────────────────────────────────────────────────────────────────
+
+        return result

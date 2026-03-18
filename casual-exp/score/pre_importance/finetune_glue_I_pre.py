@@ -11,7 +11,9 @@ from transformers import (
 )
 from data.glue import load_glue_dataset
 from utils.evaluate import evaluate_glue
-
+from accelerate import Accelerator
+from datetime import timedelta
+from accelerate.utils import InitProcessGroupKwargs
 
 class GlueEvalCallback(TrainerCallback):
     """每个 epoch 结束时调用 utils.evaluate.evaluate_glue 进行评估，
@@ -67,6 +69,9 @@ class GlueEvalCallback(TrainerCallback):
 
 
 def main():
+    kwargs = InitProcessGroupKwargs(timeout=timedelta(hours=2))
+    accelerator = Accelerator(kwargs_handlers=[kwargs])
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", type=str, required=True)  # MNLI / RTE
     ap.add_argument("--model_name", type=str, default="microsoft/deberta-v3-base")
@@ -98,11 +103,24 @@ def main():
         "--pre_importance_perturb_batches", type=int, default=4,
         help="扰动类指标使用的 mini-batch 数量（开销较大，建议 2-8）",
     )
+    ap.add_argument(
+        "--pre_importance_head_granularity", action="store_true", default=False,
+        help=(
+            "开启注意力头级别粒度计算。\n"
+            "效果：在 module_scores 基础上额外计算并保存 head_scores，\n"
+            "      对每个注意力 Q/K/V / 输出投影按头维度切分，独立评估各头重要性。\n"
+            "要求：模型具有标准 HuggingFace config（num_attention_heads、hidden_size）。\n"
+            "开销：Fisher/Saliency 无额外前向传播；Perturbation 会增加\n"
+            "      O(num_attn_modules × num_heads) 次前向传播。"
+        ),
+    )
     # ──────────────────────────────────────────────────────────────────────────
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
     os.environ["WANDB_PROJECT"] = "casual-exp-I_pre"
+    # os.environ["NCCL_TIMEOUT"] = "1800"  # 30分钟，单位秒
+    # os.environ["NCCL_BLOCKING_WAIT"] = "1"  # 启用阻塞等待，配合 timeout
     torch.manual_seed(args.seed)
     # wandb.init(project="casual-exp", name=f"Debug-FFT-baseline-{args.task}-seed{args.seed}")
 
@@ -120,7 +138,7 @@ def main():
     # 在 θ0 保存后、Trainer 创建前执行，此时模型为纯 nn.Module，无 DDP 包装。
     # 仅在主进程（local_rank==0 或无分布式）计算重要性
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    if args.pre_importance.strip() and local_rank == 0:
+    if args.pre_importance.strip() and accelerator.is_main_process:
         from torch.utils.data import DataLoader
         from metric.pre_importance.runner import PreImportanceRunner
 
@@ -141,6 +159,7 @@ def main():
                 "saliency":     {"num_batches": args.pre_importance_batches},
                 "perturbation": {"num_batches": args.pre_importance_perturb_batches},
             },
+            head_granularity=args.pre_importance_head_granularity,
         )
         _runner.run(
             model, _imp_dl, _imp_device,
@@ -149,11 +168,13 @@ def main():
         model.to("cpu")   # 交还给 Trainer 统一管理设备
         print("[PreImportance] 训练前重要性计算完毕\n")
     # 等待所有进程同步，避免提前进入训练（尤其在某些多节点情况下重要）
-    if "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
-        import torch.distributed as dist
-        if not dist.is_initialized():
-            dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")
-        dist.barrier()
+    # if "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
+    #     pass
+        # import torch.distributed as dist
+        # if not dist.is_initialized():
+        #     dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")
+        # dist.barrier()
+    accelerator.wait_for_everyone()
     # ──────────────────────────────────────────────────────────────────────────
 
     # Auto-select precision: bf16 > fp16 > fp32

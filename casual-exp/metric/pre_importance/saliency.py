@@ -15,16 +15,22 @@ metric/pre_importance/saliency.py
       近似"若将该参数置零，loss 约增加多少"（量纲与 loss 一致），
       同时考虑梯度方向与参数量级，适合结构剪枝场景。
 
+头级别扩展（head_granularity=True）：
+    对注意力模块额外按头拆分，两种变体均计算头级别分数，
+    均为梯度累积后的后处理，无额外前向传播。
+
 保存格式：
     saliency.json
     {
       "grad_norm": {
         "module_scores": {module_name: float, ...},
-        "param_scores":  {param_name:  float, ...}
+        "param_scores":  {param_name:  float, ...},
+        "head_scores":   {module_name: {"head_0": float, ...}, ...}  # 可选
       },
       "taylor": {
         "module_scores": {...},
-        "param_scores":  {...}
+        "param_scores":  {...},
+        "head_scores":   {...}  # 可选
       },
       "num_batches": int
     }
@@ -36,6 +42,11 @@ import torch
 from torch.utils.data import DataLoader
 
 from .base import ImportanceBase, group_params_by_module
+from .attn_head import (
+    get_attn_head_config,
+    get_attn_modules,
+    agg_head_scores_from_acc,
+)
 
 
 class SaliencyImportance(ImportanceBase):
@@ -54,11 +65,13 @@ class SaliencyImportance(ImportanceBase):
         dataloader: DataLoader,
         device: torch.device,
         num_batches: int = 32,
+        head_granularity: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
         """
         Args:
-            num_batches: 用于估计的 mini-batch 数量。
+            num_batches:      用于估计的 mini-batch 数量。
+            head_granularity: 若为 True，额外输出注意力头级别的 saliency 分数（两种变体）。
         """
         model = model.to(device)
         model.eval()
@@ -111,21 +124,40 @@ class SaliencyImportance(ImportanceBase):
         # 叶模块粒度聚合
         module_groups = group_params_by_module(model)
 
-        def agg(param_scores):
+        def agg(param_scores: Dict[str, float]) -> Dict[str, float]:
             return {
                 m: sum(param_scores.get(p, 0.0) for p in ps)
                 for m, ps in module_groups.items()
             }
 
         model.zero_grad()
-        return {
+        result: Dict[str, Any] = {
             "grad_norm": {
                 "module_scores": agg(param_grad_norm),
-                "param_scores": param_grad_norm,
+                "param_scores":  param_grad_norm,
             },
             "taylor": {
                 "module_scores": agg(param_taylor),
-                "param_scores": param_taylor,
+                "param_scores":  param_taylor,
             },
             "num_batches": count,
         }
+
+        # ── 头级别扩展（后处理，无额外前向传播）────────────────────────────
+        if head_granularity:
+            attn_cfg = get_attn_head_config(model)
+            if attn_cfg is None:
+                print("  [saliency] head_granularity=True 但模型无 config，跳过头级别计算")
+            else:
+                attn_mods = get_attn_modules(model, attn_cfg)
+                result["grad_norm"]["head_scores"] = agg_head_scores_from_acc(
+                    grad_abs_acc, model, attn_cfg, attn_mods, count
+                )
+                result["taylor"]["head_scores"] = agg_head_scores_from_acc(
+                    taylor_abs_acc, model, attn_cfg, attn_mods, count
+                )
+                print(f"  [saliency] 计算了 {len(attn_mods)} 个注意力模块的头级别分数"
+                      f"（每模块 {attn_cfg.num_heads} 头，两种变体）")
+        # ─────────────────────────────────────────────────────────────────────
+
+        return result
