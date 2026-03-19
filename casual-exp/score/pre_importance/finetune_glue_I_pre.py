@@ -119,10 +119,7 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     os.environ["WANDB_PROJECT"] = "casual-exp-I_pre"
-    # os.environ["NCCL_TIMEOUT"] = "1800"  # 30分钟，单位秒
-    # os.environ["NCCL_BLOCKING_WAIT"] = "1"  # 启用阻塞等待，配合 timeout
     torch.manual_seed(args.seed)
-    # wandb.init(project="casual-exp", name=f"Debug-FFT-baseline-{args.task}-seed{args.seed}")
 
     tok = AutoTokenizer.from_pretrained(args.model_name, use_fast=False)
     ds = load_glue_dataset(args.task, tok, max_len=args.max_len)
@@ -167,13 +164,7 @@ def main():
         )
         model.to("cpu")   # 交还给 Trainer 统一管理设备
         print("[PreImportance] 训练前重要性计算完毕\n")
-    # 等待所有进程同步，避免提前进入训练（尤其在某些多节点情况下重要）
-    # if "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
-    #     pass
-        # import torch.distributed as dist
-        # if not dist.is_initialized():
-        #     dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")
-        # dist.barrier()
+
     accelerator.wait_for_everyone()
     # ──────────────────────────────────────────────────────────────────────────
 
