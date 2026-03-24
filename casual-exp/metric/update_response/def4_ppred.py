@@ -4,49 +4,32 @@ metric/update_response/def4_ppred.py
 定义 4：梯度信噪比（Ppred）
 ─────────────────────────────────────────────────────────────────────────────
 公式（元素级）：
-    G_i = E[|g_i|]           （梯度绝对值的期望）
-    F_i = E[g_i²]            （梯度平方的期望 ≈ 对角 Fisher）
-    ppred_i = G_i² / (F_i + ε)
+    G_i = E[|g_i|]，F_i = E[g_i²]，ppred_i = G_i² / (F_i + ε)
 
-模块级聚合（将模块内所有参数拼接为一个长向量后计算）：
+模块级聚合：
     Ppred_m = mean_{i ∈ θ_m}(ppred_i)
 
-含义：
-    ppred_i ∈ [0, 1]（由 Cauchy-Schwarz 不等式：E[|g|]² ≤ E[g²]）：
-        → 1：各 batch 梯度符号高度一致（信号强、噪声低），参数会稳定积累净更新
-        → 0：梯度各向随机抵消（噪声主导），即使幅度大也难以产生净位移
-    Ppred_m 是"梯度一致性"（gradient coherence）的度量，
-    可解释为梯度信号的 SNR（Signal-to-Noise Ratio）：
-        SNR_i = E[g_i]² / Var[g_i] ≈ E[|g_i|]² / (E[g_i²] - E[g_i]²)
-    而 ppred_i ≈ SNR_i / (1 + SNR_i)（单调等价变换）。
+头级别聚合（head_granularity=True）：
+    Ppred_h = mean_{i ∈ head_h}(ppred_i)
 
-与 Fisher 重要性的区别：
-    Fisher_m = E[‖g_m‖²] = Σ_i E[g_i²]  →  衡量损失的平均敏感度
-    Ppred_m  = mean_i(E[|g_i|]²/E[g_i²])  →  衡量梯度信号一致性（SNR）
-    两者反映不同维度：Fisher 大且 Ppred 低 → 模块对 loss 敏感但梯度嘈杂；
-                       Fisher 中但 Ppred 高 → 梯度稳定，参数会持续朝一方向更新。
+    其中 ppred_i = G_i² / (F_i + ε) 是元素级 SNR，
+    head_h 为该头对应的权重/偏置参数切片。
 
-与定义 2 的区别：
-    定义 2：E[‖g_m‖] / √(E[‖g_m‖²] + ε) —— 模块级向量范数的归一化，衡量步长
-    定义 4：mean_i(E[|g_i|]²/E[g_i²]) —— 元素级 SNR 的均值，衡量方向一致性
-    定义 2 有物理量级（预测更新幅度），定义 4 是无单位的 [0,1] 指数。
-
-来源：
-    minimal-exp/src/measure/grad_fisher_gate.py 中对注意力头门控梯度的实现：
-        G[l,h] = mean_batch(|gate.grad[l,h]|)
-        F[l,h] = mean_batch(gate.grad[l,h]²)
-        Ppred[l,h] = G[l,h]² / (F[l,h] + ε)
-    此处推广到任意叶模块（参数级元素的统计平均），不需要门控结构。
+实现：
+    · 共用一次 backward 循环累积 abs_acc（G 的分子）和 sq_acc（F）
+    · 头级别为后处理（利用已有 G/F 张量切片），无额外前向传播
+    · 与 pre_importance 的 Fisher 共享相同的元素级累积结构
 
 保存格式：
     def4_ppred.json
     {
-      "module_scores":  {module_name: float, ...},  # Ppred_m ∈ [0, 1]
-      "param_scores":   {param_name:  float, ...},  # 各参数的元素级 Ppred 均值
-      "G_module":       {module_name: float, ...},  # mean_i E[|g_i|]（分子相关）
-      "F_module":       {module_name: float, ...},  # mean_i E[g_i²]（对角 Fisher）
+      "module_scores":  {module_name: float, ...},
+      "param_scores":   {param_name:  float, ...},
+      "G_module":       {module_name: float, ...},
+      "F_module":       {module_name: float, ...},
       "num_batches": int,
       "epsilon": float,
+      "head_scores":    {module_name: {"head_0": float, ...}, ...}  # 仅 head_granularity=True
     }
 """
 
@@ -56,13 +39,19 @@ import torch
 from torch.utils.data import DataLoader
 
 from .base import PreTrainingMetric, group_params_by_module
+from .attn_head import (
+    get_attn_head_config,
+    get_attn_modules,
+    get_head_weight_view,
+    get_head_bias_view,
+)
 
 
 class PpredMetric(PreTrainingMetric):
     """
     梯度信噪比 Ppred（定义 4）。
 
-    元素级 SNR = E[|g|]² / E[g²]，聚合为模块内元素的均值。
+    元素级 SNR = E[|g|]² / E[g²]，聚合为模块（或头）内元素的均值。
     """
 
     name = "def4_ppred"
@@ -75,12 +64,14 @@ class PpredMetric(PreTrainingMetric):
         device: torch.device,
         num_batches: int = 32,
         epsilon: float = 1e-8,
+        head_granularity: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
         """
         Args:
-            num_batches: Monte Carlo 估计 batch 数（建议 16–64）
-            epsilon:     数值稳定项（防止零 Fisher 导致除零）
+            num_batches:      Monte Carlo 估计 batch 数（建议 16–64）
+            epsilon:          数值稳定项
+            head_granularity: 若为 True，额外输出注意力头级别的 Ppred 分数
         """
         model = model.to(device)
         model.eval()
@@ -124,17 +115,17 @@ class PpredMetric(PreTrainingMetric):
 
         model.zero_grad()
 
-        # 元素级期望：G_i = E[|g_i|]，F_i = E[g_i²]
+        # 期望：G_i = E[|g_i|]，F_i = E[g_i²]
         G: Dict[str, torch.Tensor] = {n: acc / count for n, acc in abs_acc.items()}
         F: Dict[str, torch.Tensor] = {n: acc / count for n, acc in sq_acc.items()}
 
         # 参数级 Ppred：各元素 ppred_i 的均值
         param_scores: Dict[str, float] = {}
         for name in G:
-            ppred_elem = G[name].pow(2) / (F[name] + epsilon)  # [0, 1]，逐元素
+            ppred_elem = G[name].pow(2) / (F[name] + epsilon)
             param_scores[name] = ppred_elem.mean().item()
 
-        # 模块级：拼接模块内所有参数的元素后统一计算，确保元素均等权重
+        # 模块级：拼接模块内所有参数的元素后统一计算
         module_groups = group_params_by_module(model)
         module_scores: Dict[str, float] = {}
         G_module:      Dict[str, float] = {}
@@ -153,7 +144,7 @@ class PpredMetric(PreTrainingMetric):
             G_module[m_name]      = g_cat.mean().item()
             F_module[m_name]      = f_cat.mean().item()
 
-        return {
+        result: Dict[str, Any] = {
             "module_scores": module_scores,
             "param_scores":  param_scores,
             "G_module":      G_module,
@@ -161,3 +152,58 @@ class PpredMetric(PreTrainingMetric):
             "num_batches":   count,
             "epsilon":       epsilon,
         }
+
+        # ── 头级别扩展（后处理，无额外前向传播）────────────────────────────
+        if head_granularity:
+            attn_cfg = get_attn_head_config(model)
+            if attn_cfg is None:
+                print("  [def4_ppred] head_granularity=True 但模型无 config，"
+                      "跳过头级别计算")
+            else:
+                attn_mods = get_attn_modules(model, attn_cfg)
+                head_scores: Dict[str, Dict[str, float]] = {}
+
+                for m_name, m_type in attn_mods.items():
+                    per_head: Dict[str, float] = {}
+                    for h in range(attn_cfg.num_heads):
+                        g_parts, f_parts = [], []
+                        for suffix in ("weight", "bias"):
+                            pn = f"{m_name}.{suffix}"
+                            g_acc = G.get(pn)
+                            f_acc = F.get(pn)
+                            if g_acc is None:
+                                continue
+                            if suffix == "weight":
+                                gview = get_head_weight_view(
+                                    g_acc, m_type, h, attn_cfg.head_dim
+                                )
+                                fview = get_head_weight_view(
+                                    f_acc, m_type, h, attn_cfg.head_dim
+                                )
+                            else:
+                                gview = get_head_bias_view(
+                                    g_acc, m_type, h, attn_cfg.head_dim
+                                )
+                                fview = get_head_bias_view(
+                                    f_acc, m_type, h, attn_cfg.head_dim
+                                )
+                            if gview is not None:
+                                g_parts.append(gview.reshape(-1))
+                                f_parts.append(fview.reshape(-1))
+
+                        if g_parts:
+                            g_cat = torch.cat(g_parts)
+                            f_cat = torch.cat(f_parts)
+                            ppred_h = g_cat.pow(2) / (f_cat + epsilon)
+                            per_head[f"head_{h}"] = ppred_h.mean().item()
+                        else:
+                            per_head[f"head_{h}"] = 0.0
+
+                    head_scores[m_name] = per_head
+
+                result["head_scores"] = head_scores
+                print(f"  [def4_ppred] 计算了 {len(attn_mods)} 个注意力模块的"
+                      f"头级别 Ppred（每模块 {attn_cfg.num_heads} 头）")
+        # ─────────────────────────────────────────────────────────────────────
+
+        return result

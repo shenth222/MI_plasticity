@@ -123,6 +123,12 @@ def main():
                     help="def3：累积步数 T_early（建议 50–200）")
     ap.add_argument("--ur_epsilon",       type=float, default=1e-8,
                     help="def2/def4：数值稳定项 ε")
+    ap.add_argument("--ur_head_granularity", action="store_true", default=False,
+                    help=(
+                        "开启注意力头级别粒度计算。\n"
+                        "对 def1/def2/def4 按头拆分参数，对 def3 按头累积梯度范数。\n"
+                        "要求模型具有标准 HuggingFace config（num_attention_heads）。"
+                    ))
     # ──────────────────────────────────────────────────────────────────────────
     args = ap.parse_args()
 
@@ -177,6 +183,7 @@ def main():
             _ur_probe_lr = args.ur_probe_lr if args.ur_probe_lr is not None else args.lr
             _ur_runner = UpdateResponseRunner.from_str(
                 args.update_response,
+                head_granularity=args.ur_head_granularity,
                 metric_kwargs={
                     "def1": {
                         "probe_steps":  args.ur_probe_steps,

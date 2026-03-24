@@ -27,6 +27,7 @@ UpdateResponseRunner：更新响应预测的统一组合入口。
             "def3": {"T_early": 100},
             "def4": {"num_batches": 32},
         },
+        head_granularity=True,   # 同时计算注意力头级别分数
     )
 
     # ── 嵌入点 1：训练前（θ₀ 保存后，Trainer 创建前）
@@ -74,15 +75,19 @@ class UpdateResponseRunner:
     · 训练中指标（def3）返回 TrainerCallback，注册到 Trainer 后自动运行。
 
     Args:
-        metrics:       指标名列表，可任意组合，顺序不影响结果
-        metric_kwargs: 各指标的超参数字典，格式为
-                       {"def1": {"probe_steps": 20}, "def3": {"T_early": 100}}
+        metrics:          指标名列表，可任意组合，顺序不影响结果
+        metric_kwargs:    各指标的超参数字典，格式为
+                          {"def1": {"probe_steps": 20}, "def3": {"T_early": 100}}
+        head_granularity: 若为 True，所有指标额外计算注意力头级别分数；
+                          结果附加在各 JSON 的 "head_scores" 字段，不影响 "module_scores"。
+                          要求模型具有标准 HuggingFace config（num_attention_heads、hidden_size）。
     """
 
     def __init__(
         self,
         metrics: List[str],
         metric_kwargs: Optional[Dict[str, Dict]] = None,
+        head_granularity: bool = False,
     ):
         unknown = set(metrics) - set(REGISTRY)
         if unknown:
@@ -101,13 +106,15 @@ class UpdateResponseRunner:
             for name in metrics
             if name in IN_TRAINING_METRICS
         }
-        self.metric_kwargs: Dict[str, Dict] = metric_kwargs or {}
+        self.metric_kwargs:    Dict[str, Dict] = metric_kwargs or {}
+        self.head_granularity: bool            = head_granularity
 
     @classmethod
     def from_str(
         cls,
         metrics_str: str,
         metric_kwargs: Optional[Dict[str, Dict]] = None,
+        head_granularity: bool = False,
     ) -> "UpdateResponseRunner":
         """
         从逗号分隔的字符串构造，便于命令行传参。
@@ -116,10 +123,12 @@ class UpdateResponseRunner:
             UpdateResponseRunner.from_str(
                 "def1,def2,def4",
                 metric_kwargs={"def1": {"probe_steps": 20}},
+                head_granularity=True,
             )
         """
         names = [m.strip() for m in metrics_str.split(",") if m.strip()]
-        return cls(metrics=names, metric_kwargs=metric_kwargs)
+        return cls(metrics=names, metric_kwargs=metric_kwargs,
+                   head_granularity=head_granularity)
 
     # ------------------------------------------------------------------
     # 训练前运行（def1, def2, def4）
@@ -149,13 +158,17 @@ class UpdateResponseRunner:
 
         Path(save_dir).mkdir(parents=True, exist_ok=True)
         all_results: Dict[str, Any] = {}
+        gran_tag = " [+head]" if self.head_granularity else ""
 
         for name, metric in self._pre_metrics.items():
             print(f"\n{'='*60}")
-            print(f"[UpdateResponseRunner] Computing pre-training: {name}")
+            print(f"[UpdateResponseRunner] Computing pre-training: {name}{gran_tag}")
             print(f"{'='*60}")
 
             kw = dict(self.metric_kwargs.get(name, {}))
+            if self.head_granularity:
+                kw["head_granularity"] = True
+
             scores = metric.compute(model, dataloader, device, **kw)
             metric.save(scores, save_dir)
             all_results[name] = scores
@@ -190,9 +203,12 @@ class UpdateResponseRunner:
         callbacks = []
         for name, metric in self._in_metrics.items():
             kw = dict(self.metric_kwargs.get(name, {}))
+            if self.head_granularity:
+                kw["head_granularity"] = True
             cb = metric.make_callback(model=model, save_dir=save_dir, **kw)
             callbacks.append(cb)
-            print(f"[UpdateResponseRunner] Registered in-training callback: {name}")
+            gran_tag = " [+head]" if self.head_granularity else ""
+            print(f"[UpdateResponseRunner] Registered in-training callback: {name}{gran_tag}")
         return callbacks
 
     # ------------------------------------------------------------------

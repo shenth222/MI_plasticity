@@ -5,7 +5,7 @@
 # 用法：bash score/update_response/run.sh [seed] [task] [lr]
 # 示例：bash score/update_response/run.sh 1 MNLI 2e-5
 
-SEED=${1:-1}
+SEED=${1:-42}
 TASK=${2:-"MNLI"}
 LR=${3:-"1e-5"}
 MODEL="/data1/shenth/models/deberta/v3-base"
@@ -30,7 +30,8 @@ accelerate launch --num_processes=4 -m score.update_response.finetune_glue_R_hat
     --ur_probe_steps  20 \
     --ur_num_batches  32 \
     --ur_T_early      100 \
-    --ur_epsilon      1e-8
+    --ur_epsilon      1e-8 \
+    --ur_head_granularity
 
 echo ""
 echo "Done. Results saved to:"
