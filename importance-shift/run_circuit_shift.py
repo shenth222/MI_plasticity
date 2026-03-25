@@ -146,16 +146,23 @@ def compute_shift(
             "rel_shift": rel_shift,
         }
 
-    # Attention matrix shifts
-    attn_shift = np.zeros((num_layers, num_heads))
+    # Attention matrix shifts & rel_shifts
+    attn_shift     = np.zeros((num_layers, num_heads))
+    attn_rel_shift = np.zeros((num_layers, num_heads))
     for l in range(num_layers):
         for h in range(num_heads):
             key = f"L{l}_H{h}"
-            attn_shift[l, h] = per_component.get(key, {}).get("shift", 0.0)
+            d = per_component.get(key, {})
+            attn_shift[l, h]     = d.get("shift", 0.0)
+            attn_rel_shift[l, h] = d.get("rel_shift", 0.0)
 
-    # MLP vector shifts
+    # MLP vector shifts & rel_shifts
     mlp_shift = np.array([
         per_component.get(f"L{l}_MLP", {}).get("shift", 0.0)
+        for l in range(num_layers)
+    ])
+    mlp_rel_shift = np.array([
+        per_component.get(f"L{l}_MLP", {}).get("rel_shift", 0.0)
         for l in range(num_layers)
     ])
 
@@ -201,8 +208,10 @@ def compute_shift(
 
     return {
         "per_component": per_component,
-        "attn_shift": attn_shift,
-        "mlp_shift": mlp_shift,
+        "attn_shift":     attn_shift,
+        "attn_rel_shift": attn_rel_shift,
+        "mlp_shift":      mlp_shift,
+        "mlp_rel_shift":  mlp_rel_shift,
         "summary": summary,
     }
 
@@ -254,9 +263,12 @@ def main():
     with open(os.path.join(args.out_dir, "circuit_shift.json"), "w") as f:
         json.dump(result["per_component"], f, indent=2)
 
-    # 2. NumPy matrices
-    np.save(os.path.join(args.out_dir, "shift_attn.npy"), result["attn_shift"])
-    np.save(os.path.join(args.out_dir, "shift_mlp.npy"), result["mlp_shift"])
+    # 2. NumPy matrices (absolute shift)
+    np.save(os.path.join(args.out_dir, "shift_attn.npy"),     result["attn_shift"])
+    np.save(os.path.join(args.out_dir, "shift_mlp.npy"),      result["mlp_shift"])
+    # NumPy matrices (relative shift)
+    np.save(os.path.join(args.out_dir, "rel_shift_attn.npy"), result["attn_rel_shift"])
+    np.save(os.path.join(args.out_dir, "rel_shift_mlp.npy"),  result["mlp_rel_shift"])
 
     # 3. Summary
     with open(os.path.join(args.out_dir, "summary.json"), "w") as f:
