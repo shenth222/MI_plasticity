@@ -192,6 +192,120 @@ def test_runner_available_metrics():
 
 
 # ---------------------------------------------------------------------------
+# 头级别（head_granularity）测试（使用 TinyHFClassifier）
+# ---------------------------------------------------------------------------
+
+def test_runner_head_granularity_from_str():
+    """from_str 正确接收并存储 head_granularity 标志。"""
+    r_no_head  = ActualUpdateRunner.from_str("def1,def2", head_granularity=False)
+    r_with_head = ActualUpdateRunner.from_str("def1,def2", head_granularity=True)
+    assert r_no_head.head_granularity  is False
+    assert r_with_head.head_granularity is True
+    print("✓ from_str 正确传递 head_granularity 标志")
+
+
+def test_runner_head_granularity_all():
+    """
+    head_granularity=True 时，三种指标均生成含 head_scores 的 JSON。
+    使用 TinyHFClassifier（有 config）。
+    """
+    from metric.actual_update.test.conftest import TinyHFClassifier, TinyConfig
+
+    cfg   = TinyConfig(hidden_size=8, num_attention_heads=2)
+    model = TinyHFClassifier(cfg)
+    dl    = make_fake_dataloader(batch_size=4, num_batches=8)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        runner = ActualUpdateRunner.from_str(
+            "def1,def2,def3",
+            metric_kwargs={"def3": {"log_every": 1}},
+            head_granularity=True,
+        )
+        callbacks = runner.make_callbacks(model, save_dir=tmpdir)
+        args, state, control = train_n_steps(model, dl, callbacks=callbacks, steps=5)
+        fire_train_end(callbacks, model, args, state, control)
+
+        for fname in ("def1_absolute.json", "def2_relative.json", "def3_path_length.json"):
+            path = os.path.join(tmpdir, fname)
+            assert os.path.exists(path), f"{fname} 未生成"
+            with open(path) as f:
+                d = json.load(f)
+            assert "head_scores" in d, f"{fname} 缺少 head_scores"
+            assert len(d["head_scores"]) > 0, f"{fname}.head_scores 为空"
+            # 验证头数量
+            for m_name, per_head in d["head_scores"].items():
+                assert len(per_head) == cfg.num_attention_heads, (
+                    f"{fname}.{m_name}: head 数量={len(per_head)}，"
+                    f"期望={cfg.num_attention_heads}"
+                )
+
+    print(
+        f"✓ head_granularity=True：全部3个JSON均含 head_scores，"
+        f"每模块 {cfg.num_attention_heads} 头"
+    )
+
+
+def test_runner_head_granularity_per_metric_override():
+    """
+    metric_kwargs 中单独设置某个指标的 head_granularity，可覆盖全局设置。
+    例：全局 False，但 def1 通过 metric_kwargs 设置 True。
+    """
+    from metric.actual_update.test.conftest import TinyHFClassifier
+
+    model = TinyHFClassifier()
+    dl    = make_fake_dataloader(batch_size=4, num_batches=8)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        runner = ActualUpdateRunner.from_str(
+            "def1,def2",
+            metric_kwargs={
+                "def1": {"head_granularity": True},   # 单独开启
+                # def2 不设置，将继承全局 False
+            },
+            head_granularity=False,   # 全局 False
+        )
+        callbacks = runner.make_callbacks(model, save_dir=tmpdir)
+        args, state, control = train_n_steps(model, dl, callbacks=callbacks, steps=5)
+        fire_train_end(callbacks, model, args, state, control)
+
+        # def1 应有 head_scores（metric_kwargs 覆盖全局）
+        with open(os.path.join(tmpdir, "def1_absolute.json")) as f:
+            d1 = json.load(f)
+        assert "head_scores" in d1, "def1 metric_kwargs 覆盖 head_granularity=True 未生效"
+
+        # def2 不应有 head_scores（继承全局 False）
+        with open(os.path.join(tmpdir, "def2_relative.json")) as f:
+            d2 = json.load(f)
+        assert "head_scores" not in d2, "def2 应继承全局 head_granularity=False"
+
+    print("✓ metric_kwargs 可单独覆盖 head_granularity（def1=True, def2=False）")
+
+
+def test_runner_head_granularity_no_config():
+    """
+    head_granularity=True 但模型无 config（TinyClassifier）时，
+    不崩溃，JSON 不含 head_scores（降级处理）。
+    """
+    model = TinyClassifier()
+    dl    = make_fake_dataloader(batch_size=4, num_batches=8)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        runner = ActualUpdateRunner.from_str("def1,def2", head_granularity=True)
+        callbacks = runner.make_callbacks(model, save_dir=tmpdir)
+        args, state, control = train_n_steps(model, dl, callbacks=callbacks, steps=5)
+        fire_train_end(callbacks, model, args, state, control)
+
+        for fname in ("def1_absolute.json", "def2_relative.json"):
+            with open(os.path.join(tmpdir, fname)) as f:
+                d = json.load(f)
+            assert "head_scores" not in d, (
+                f"{fname}: 无 config 时不应含 head_scores"
+            )
+
+    print("✓ 无 config 时 head_granularity 安全降级（不崩溃，不含 head_scores）")
+
+
+# ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
 
@@ -210,4 +324,10 @@ if __name__ == "__main__":
     test_runner_all_three()
     test_runner_metric_kwargs_log_every()
     test_runner_available_metrics()
+    print()
+    print("── 头级别（head_granularity）测试 ──")
+    test_runner_head_granularity_from_str()
+    test_runner_head_granularity_all()
+    test_runner_head_granularity_per_metric_override()
+    test_runner_head_granularity_no_config()
     print("\n所有测试通过 ✓")

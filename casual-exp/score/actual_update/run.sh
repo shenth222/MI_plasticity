@@ -30,12 +30,13 @@ OUT_DIR="score/actual_update/outputs/FFT/${TASK}/seed${SEED}/lr${LR}"
 AU_METRICS="def1,def2,def3"
 AU_LOG_EVERY=1     # 按需调整：大任务（MNLI）建议改为 10
 AU_EPSILON=1e-8
+AU_HEAD=true       # 是否计算头级别分数（true/false）
 
 # ── 打印配置 ──────────────────────────────────────────────────────────────────
 echo "============================================================"
 echo "  U_m 实验：DeBERTa-v3-base FFT on ${TASK}"
 echo "  seed=${SEED}  lr=${LR}  metrics=${AU_METRICS}"
-echo "  def3 log_every=${AU_LOG_EVERY}"
+echo "  def3 log_every=${AU_LOG_EVERY}  head_granularity=${AU_HEAD}"
 echo "  out_dir=${OUT_DIR}"
 echo "============================================================"
 
@@ -55,7 +56,8 @@ accelerate launch --num_processes=4 \
     \
     --actual_update  ${AU_METRICS}  \
     --au_log_every   ${AU_LOG_EVERY} \
-    --au_epsilon     ${AU_EPSILON}
+    --au_epsilon     ${AU_EPSILON}   \
+    $([ "${AU_HEAD}" = "true" ] && echo "--au_head_granularity")
 
 # ── 结果路径提示 ──────────────────────────────────────────────────────────────
 echo ""
@@ -63,6 +65,9 @@ echo "Done. Results saved to:"
 echo "  θ₀:      ${OUT_DIR}/ckpt_init"
 echo "  θ₁:      ${OUT_DIR}/ckpt_final"
 echo "  def1:    ${OUT_DIR}/actual_update/def1_absolute.json"
+echo "            (含 module_scores / weight_only_scores / param_scores$([ "${AU_HEAD}" = "true" ] && echo " / head_scores"))"
 echo "  def2:    ${OUT_DIR}/actual_update/def2_relative.json"
+echo "            (含 module_scores / abs_module_scores / init_norm_scores$([ "${AU_HEAD}" = "true" ] && echo " / head_scores / head_abs_delta_scores / head_init_norm_scores"))"
 echo "  def3:    ${OUT_DIR}/actual_update/def3_path_length.json"
+echo "            (含 module_scores / param_scores / steps_collected$([ "${AU_HEAD}" = "true" ] && echo " / head_scores"))"
 echo "  config:  ${OUT_DIR}/run_config.json"

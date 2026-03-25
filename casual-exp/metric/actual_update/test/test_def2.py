@@ -214,6 +214,139 @@ def test_def2_print_topk(top_k: int = 5):
 
 
 # ---------------------------------------------------------------------------
+# 头级别测试（使用 TinyHFClassifier）
+# ---------------------------------------------------------------------------
+
+def test_def2_head_granularity_structure():
+    """
+    head_granularity=True 时结果含 head_scores / head_abs_delta_scores /
+    head_init_norm_scores，结构正确，头数量等于 config.num_attention_heads。
+    """
+    from metric.actual_update.test.conftest import TinyHFClassifier, TinyConfig
+
+    cfg    = TinyConfig(hidden_size=8, num_attention_heads=2)
+    model  = TinyHFClassifier(cfg)
+    dl     = make_fake_dataloader(batch_size=4, num_batches=8)
+    device = torch.device("cpu")
+    theta0 = snapshot_params(model)
+    train_n_steps(model, dl, steps=5, lr=1e-2)
+
+    result = RelativeUpdateMetric().compute(
+        theta0, model, device, head_granularity=True
+    )
+
+    for field in ("head_scores", "head_abs_delta_scores", "head_init_norm_scores"):
+        assert field in result, f"缺少字段: {field}"
+        assert len(result[field]) > 0, f"{field} 为空"
+
+    for m_name, per_head in result["head_scores"].items():
+        assert len(per_head) == cfg.num_attention_heads
+        for h in range(cfg.num_attention_heads):
+            assert f"head_{h}" in per_head
+
+    print(
+        f"✓ head_granularity: head_scores / head_abs_delta_scores / "
+        f"head_init_norm_scores 结构正确"
+    )
+
+
+def test_def2_head_granularity_formula():
+    """
+    head_scores[m][h] = head_abs_delta_scores[m][h] / (head_init_norm_scores[m][h] + ε)
+    公式一致性验证。
+    """
+    from metric.actual_update.test.conftest import TinyHFClassifier, TinyConfig
+
+    eps    = 1e-8
+    cfg    = TinyConfig(hidden_size=8, num_attention_heads=2)
+    model  = TinyHFClassifier(cfg)
+    dl     = make_fake_dataloader(batch_size=4, num_batches=8)
+    device = torch.device("cpu")
+    theta0 = snapshot_params(model)
+    train_n_steps(model, dl, steps=5, lr=1e-2)
+
+    result = RelativeUpdateMetric().compute(
+        theta0, model, device, epsilon=eps, head_granularity=True
+    )
+
+    for m_name in result["head_scores"]:
+        for hk in result["head_scores"][m_name]:
+            rel  = result["head_scores"][m_name][hk]
+            absd = result["head_abs_delta_scores"][m_name][hk]
+            init = result["head_init_norm_scores"][m_name][hk]
+            expected = absd / (init + eps)
+            assert abs(rel - expected) < 1e-9, (
+                f"{m_name}.{hk}: rel={rel:.10f}, 期望={expected:.10f}"
+            )
+
+    print("✓ 头级别相对更新量公式正确（head_abs / (head_init + ε)）")
+
+
+def test_def2_head_granularity_absent_by_default():
+    """head_granularity=False（默认）时，结果不包含任何头级别字段。"""
+    from metric.actual_update.test.conftest import TinyHFClassifier
+
+    model  = TinyHFClassifier()
+    dl     = make_fake_dataloader(batch_size=4, num_batches=8)
+    device = torch.device("cpu")
+    theta0 = snapshot_params(model)
+    train_n_steps(model, dl, steps=3, lr=1e-2)
+
+    result = RelativeUpdateMetric().compute(theta0, model, device, head_granularity=False)
+    for field in ("head_scores", "head_abs_delta_scores", "head_init_norm_scores"):
+        assert field not in result, f"head_granularity=False 时不应含 {field}"
+    print("✓ head_granularity=False 时结果不含头级别字段（正确）")
+
+
+def test_def2_head_granularity_callback():
+    """callback + head_granularity=True 端到端：JSON 含三个头级别字段。"""
+    from metric.actual_update.test.conftest import TinyHFClassifier
+
+    model  = TinyHFClassifier()
+    dl     = make_fake_dataloader(batch_size=4, num_batches=8)
+    metric = RelativeUpdateMetric()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cb = metric.make_callback(model, save_dir=tmpdir, head_granularity=True)
+        args, state, control = train_n_steps(model, dl, callbacks=[cb], steps=5)
+        fire_train_end([cb], model, args, state, control)
+
+        json_path = os.path.join(tmpdir, f"{metric.name}.json")
+        assert os.path.exists(json_path)
+        with open(json_path) as f:
+            saved = json.load(f)
+
+        for field in ("head_scores", "head_abs_delta_scores", "head_init_norm_scores"):
+            assert field in saved, f"callback JSON 缺少 {field}"
+
+    print("✓ callback 端到端（head_granularity=True）：JSON 含三个头级别字段")
+
+
+def test_def2_head_granularity_print(top_k: int = 3):
+    """打印头级别相对更新量（供人工核验）。"""
+    from metric.actual_update.test.conftest import TinyHFClassifier, TinyConfig
+
+    cfg    = TinyConfig(hidden_size=8, num_attention_heads=2)
+    model  = TinyHFClassifier(cfg)
+    dl     = make_fake_dataloader(batch_size=4, num_batches=8)
+    device = torch.device("cpu")
+    theta0 = snapshot_params(model)
+    train_n_steps(model, dl, steps=10, lr=1e-2)
+    result = RelativeUpdateMetric().compute(theta0, model, device, head_granularity=True)
+
+    print(f"\n定义二头级别 Top-{top_k} 注意力模块（steps=10）：")
+    head_items = sorted(
+        result["head_scores"].items(),
+        key=lambda kv: result["module_scores"].get(kv[0], 0.0),
+        reverse=True,
+    )[:top_k]
+    for m_name, per_head in head_items:
+        mod_rel = result["module_scores"].get(m_name, 0.0)
+        head_str = "  ".join(f"h{h}={v:.6f}" for h, v in enumerate(per_head.values()))
+        print(f"  {m_name:<60} module_rel={mod_rel:.6f}  {head_str}")
+
+
+# ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
 
@@ -230,4 +363,11 @@ if __name__ == "__main__":
     test_def2_save_load()
     test_def2_callback_end_to_end()
     test_def2_print_topk()
+    print()
+    print("── 头级别（head_granularity）测试 ──")
+    test_def2_head_granularity_structure()
+    test_def2_head_granularity_formula()
+    test_def2_head_granularity_absent_by_default()
+    test_def2_head_granularity_callback()
+    test_def2_head_granularity_print()
     print("\n所有测试通过 ✓")

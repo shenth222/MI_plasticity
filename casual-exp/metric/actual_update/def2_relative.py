@@ -8,25 +8,16 @@ metric/actual_update/def2_relative.py
     U_m^{rel} = ||Δθ_m||_2 / ( ||θ_m^{(0)}||_2 + ε )
 
 其中：
-    ||Δθ_m||_2  = sqrt( Σ_{p ∈ θ_m} ||Δp||_F² )  — 模块全参数 L2 变化量（同定义一变体A）
-    ||θ_m^{(0)}||_2 = sqrt( Σ_{p ∈ θ_m} ||p^{(0)}||_F² )  — 初始参数 L2 范数
-    ε = 1e-8                                        — 数值稳定项，防止除以零
+    ||Δθ_m||_2  = sqrt( Σ_{p ∈ θ_m} ||Δp||_F² )
+    ||θ_m^{(0)}||_2 = sqrt( Σ_{p ∈ θ_m} ||p^{(0)}||_F² )
+    ε = 1e-8
 
-含义：
-    将绝对更新量归一化到初始参数的量级上，消除不同模块参数规模差异的影响。
-    值接近或超过 1 表示参数发生了与其初始量级相当的剧烈变化（高可塑性）；
-    值远小于 1 表示该模块几乎未被微调触及（低可塑性/冻结效应）。
+头级别（head_granularity=True）：
 
-嵌入训练（最小侵入）：
-    metric = RelativeUpdateMetric()
-    cb = metric.make_callback(model, save_dir)
-    trainer = Trainer(..., callbacks=[..., cb])
+    U_h^{rel} = head_delta_h / ( head_init_h + ε )
 
-独立测试：
-    from metric.actual_update.base import snapshot_params
-    theta0 = snapshot_params(model)
-    ... (训练) ...
-    result = RelativeUpdateMetric().compute(theta0, model, device)
+    head_delta_h = sqrt( Σ_{p∈{w,b}} ||view_h(Δp)||_F² )   — 变化量
+    head_init_h  = sqrt( Σ_{p∈{w,b}} ||view_h(p^(0))||_F² ) — 初始量
 
 ─────────────────────────────────────────────────────────────────────────────
 保存格式：
@@ -37,17 +28,26 @@ metric/actual_update/def2_relative.py
       "init_norm_scores":  {module_name: float, ...},  # ||θ_m^(0)||_2（分母）
       "param_scores":      {param_name:  float, ...},  # 参数粒度相对更新量
       "epsilon":           float,
+      "head_scores":       {module_name: {"head_0": float, ...}},  # 仅 head_granularity=True
+      "head_abs_delta_scores": {module_name: {"head_0": float, ...}},  # 分子（头级别）
+      "head_init_norm_scores": {module_name: {"head_0": float, ...}},  # 分母（头级别）
     }
 """
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments
 
 from .base import SnapshotMetric, group_params_by_module, snapshot_params, resolve_param_dict
+from .attn_head import (
+    get_attn_head_config,
+    get_attn_modules,
+    compute_head_delta_l2,
+    compute_head_init_l2,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -59,62 +59,97 @@ def compute_relative(
     param_dict: Dict[str, torch.Tensor],
     module_groups: Dict[str, list],
     epsilon: float = 1e-8,
+    head_granularity: bool = False,
+    model: Optional[torch.nn.Module] = None,
 ) -> Dict[str, Any]:
     """
-    相对更新量核心计算。
+    相对更新量核心计算，可选地输出注意力头级别分数。
 
     Args:
-        theta0:        {param_name: tensor_cpu}，初始参数快照
-        param_dict:    {param_name: param_tensor}，当前模型参数（任意设备）
-        module_groups: {module_name: [param_name, ...]}
-        epsilon:       数值稳定项（默认 1e-8）
+        theta0:           初始参数快照 {param_name: tensor_cpu}
+        param_dict:       当前模型参数 {param_name: param_tensor}
+        module_groups:    {module_name: [param_name, ...]}
+        epsilon:          数值稳定项（默认 1e-8）
+        head_granularity: 是否计算注意力头级别分数
+        model:            用于提取 attn_head_config（仅 head_granularity=True 时使用）
 
     Returns:
-        {
-          "module_scores":     {module_name: float},  # U_m^rel
-          "abs_module_scores": {module_name: float},  # ||Δθ_m||_2（分子）
-          "init_norm_scores":  {module_name: float},  # ||θ_m^(0)||_2（分母）
-          "param_scores":      {param_name:  float},  # 参数粒度相对更新量
-          "epsilon":           float,
-        }
+        包含 module_scores / abs_module_scores / init_norm_scores / param_scores
+        以及可选的 head_scores / head_abs_delta_scores / head_init_norm_scores 的字典
     """
-    # ── 参数级：||Δp||_F 与 ||p^(0)||_F ─────────────────────────────────────
-    param_delta_norms: Dict[str, float] = {}  # ||Δp||_F
-    param_init_norms:  Dict[str, float] = {}  # ||p^(0)||_F
-    param_scores:      Dict[str, float] = {}  # ||Δp||_F / (||p^(0)||_F + ε)
+    # ── 参数级 ────────────────────────────────────────────────────────────────
+    param_delta_norms: Dict[str, float] = {}
+    param_init_norms:  Dict[str, float] = {}
+    param_scores:      Dict[str, float] = {}
+    delta_tensors:     Dict[str, torch.Tensor] = {}  # 仅 head_granularity=True 时填充
 
     for name, t0 in theta0.items():
         p = param_dict.get(name)
         if p is None:
             continue
         delta  = p.data.cpu() - t0
-        d_norm = delta.norm(p=2).item()   # ||Δp||_F
-        i_norm = t0.norm(p=2).item()      # ||p^(0)||_F
+        d_norm = delta.norm(p=2).item()
+        i_norm = t0.norm(p=2).item()
         param_delta_norms[name] = d_norm
         param_init_norms[name]  = i_norm
         param_scores[name]      = d_norm / (i_norm + epsilon)
+        if head_granularity:
+            delta_tensors[name] = delta
 
-    # ── 模块级：全参数 L2 正交组合（sqrt of sum of squares）──────────────────
-    abs_module_scores: Dict[str, float] = {}   # ||Δθ_m||_2  分子
-    init_norm_scores:  Dict[str, float] = {}   # ||θ_m^(0)||_2  分母
-    module_scores:     Dict[str, float] = {}   # U_m^rel = 分子 / (分母 + ε)
+    # ── 模块级 ────────────────────────────────────────────────────────────────
+    abs_module_scores: Dict[str, float] = {}
+    init_norm_scores:  Dict[str, float] = {}
+    module_scores:     Dict[str, float] = {}
 
     for m_name, param_names in module_groups.items():
-        abs_sq  = sum(param_delta_norms.get(pn, 0.0) ** 2 for pn in param_names)
-        init_sq = sum(param_init_norms.get(pn,  0.0) ** 2 for pn in param_names)
+        abs_sq   = sum(param_delta_norms.get(pn, 0.0) ** 2 for pn in param_names)
+        init_sq  = sum(param_init_norms.get(pn,  0.0) ** 2 for pn in param_names)
         abs_norm  = abs_sq  ** 0.5
         init_norm = init_sq ** 0.5
-        abs_module_scores[m_name]  = abs_norm
-        init_norm_scores[m_name]   = init_norm
-        module_scores[m_name]      = abs_norm / (init_norm + epsilon)
+        abs_module_scores[m_name] = abs_norm
+        init_norm_scores[m_name]  = init_norm
+        module_scores[m_name]     = abs_norm / (init_norm + epsilon)
 
-    return {
+    result: Dict[str, Any] = {
         "module_scores":     module_scores,
         "abs_module_scores": abs_module_scores,
         "init_norm_scores":  init_norm_scores,
         "param_scores":      param_scores,
         "epsilon":           epsilon,
     }
+
+    # ── 头级别扩展 ────────────────────────────────────────────────────────────
+    if head_granularity and delta_tensors:
+        if model is None:
+            print("  [def2_relative] head_granularity=True 但未传入 model，跳过头级别计算")
+        else:
+            attn_cfg = get_attn_head_config(model)
+            if attn_cfg is None:
+                print("  [def2_relative] head_granularity=True 但模型无 config，跳过头级别计算")
+            else:
+                attn_mods = get_attn_modules(model, attn_cfg)
+
+                # 分子：各头的 ||Δθ_h||₂
+                head_abs = compute_head_delta_l2(delta_tensors, attn_cfg, attn_mods)
+                # 分母：各头的 ||θ_h^(0)||₂
+                head_init = compute_head_init_l2(theta0, attn_cfg, attn_mods)
+                # 相对更新量：分子 / (分母 + ε)
+                head_scores: Dict[str, Dict[str, float]] = {}
+                for m_name in attn_mods:
+                    abs_h  = head_abs.get(m_name, {})
+                    init_h = head_init.get(m_name, {})
+                    head_scores[m_name] = {
+                        hk: abs_h.get(hk, 0.0) / (init_h.get(hk, 0.0) + epsilon)
+                        for hk in abs_h
+                    }
+
+                result["head_scores"]            = head_scores
+                result["head_abs_delta_scores"]  = head_abs
+                result["head_init_norm_scores"]  = head_init
+                print(f"  [def2_relative] 计算了 {len(attn_mods)} 个注意力模块的"
+                      f"头级别相对更新量（每模块 {attn_cfg.num_heads} 头）")
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -132,23 +167,22 @@ class RelativeUpdateCallback(TrainerCallback):
         model: torch.nn.Module,
         save_dir: str,
         epsilon: float = 1e-8,
+        head_granularity: bool = False,
         name: str = "def2_relative",
     ):
-        """
-        Args:
-            model:    未经 DDP 包装的原始模型（在 Trainer 创建前传入）
-            save_dir: 结果保存目录
-            epsilon:  数值稳定项（默认 1e-8）
-            name:     JSON 文件名（无需修改）
-        """
-        self._save_dir      = save_dir
-        self._epsilon       = epsilon
-        self._name          = name
-        self._module_groups = group_params_by_module(model)
+        self._save_dir        = save_dir
+        self._epsilon         = epsilon
+        self._name            = name
+        self._head_granularity = head_granularity
+        self._module_groups   = group_params_by_module(model)
+        self._model_ref       = model
 
-        # 立即记录 θ^(0) 快照
         self._theta0 = snapshot_params(model)
-        print(f"[{name}] θ^(0) 快照已记录（{len(self._theta0)} 个可训练参数）")
+        print(
+            f"[{name}] θ^(0) 快照已记录（{len(self._theta0)} 个可训练参数"
+            + ("，已启用头级别粒度" if head_granularity else "")
+            + "）"
+        )
 
     def on_train_end(
         self,
@@ -163,7 +197,10 @@ class RelativeUpdateCallback(TrainerCallback):
 
         param_dict = resolve_param_dict(model)
         result = compute_relative(
-            self._theta0, param_dict, self._module_groups, self._epsilon
+            self._theta0, param_dict, self._module_groups,
+            epsilon=self._epsilon,
+            head_granularity=self._head_granularity,
+            model=self._model_ref,
         )
 
         save_dir = Path(self._save_dir)
@@ -185,10 +222,13 @@ class RelativeUpdateMetric(SnapshotMetric):
     相对更新量（定义二）—— SnapshotMetric 包装类。
 
     输出字段：
-      · module_scores      U_m^rel = ||Δθ_m||_2 / (||θ_m^(0)||_2 + ε)（主指标）
-      · abs_module_scores  分子 ||Δθ_m||_2（与定义一变体A完全一致，可交叉验证）
-      · init_norm_scores   分母 ||θ_m^(0)||_2（初始参数范数）
+      · module_scores      U_m^rel（主指标）
+      · abs_module_scores  ||Δθ_m||₂（分子，与 def1 变体A 一致）
+      · init_norm_scores   ||θ_m^(0)||₂（分母）
       · param_scores       参数粒度相对更新量
+      · head_scores        头级别相对更新量（仅 head_granularity=True）
+      · head_abs_delta_scores  头级别 ||Δθ_h||₂（分子，仅 head_granularity=True）
+      · head_init_norm_scores  头级别 ||θ_h^(0)||₂（分母，仅 head_granularity=True）
     """
 
     name = "def2_relative"
@@ -199,36 +239,25 @@ class RelativeUpdateMetric(SnapshotMetric):
         model: torch.nn.Module,
         device: torch.device,
         epsilon: float = 1e-8,
+        head_granularity: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
-        """
-        独立测试接口：给定初始参数快照和当前模型，计算相对更新量。
-
-        Args:
-            theta0:  微调前的参数快照，{param_name: tensor_cpu}
-            model:   微调后的模型（处于 θ^(T) 状态）
-            device:  计算设备（保留接口一致性）
-            epsilon: 数值稳定项（默认 1e-8）
-        """
         module_groups = group_params_by_module(model)
         param_dict    = resolve_param_dict(model)
-        return compute_relative(theta0, param_dict, module_groups, epsilon)
+        return compute_relative(
+            theta0, param_dict, module_groups,
+            epsilon=epsilon, head_granularity=head_granularity, model=model,
+        )
 
     def make_callback(
         self,
         model: torch.nn.Module,
         save_dir: str,
         epsilon: float = 1e-8,
+        head_granularity: bool = False,
         **kwargs,
     ) -> RelativeUpdateCallback:
-        """
-        创建 TrainerCallback（必须在 Trainer 创建前调用）。
-
-        Args:
-            model:    未经 DDP 包装的原始模型
-            save_dir: 结果保存目录
-            epsilon:  数值稳定项（默认 1e-8）
-        """
         return RelativeUpdateCallback(
-            model=model, save_dir=save_dir, epsilon=epsilon, name=self.name
+            model=model, save_dir=save_dir,
+            epsilon=epsilon, head_granularity=head_granularity, name=self.name,
         )

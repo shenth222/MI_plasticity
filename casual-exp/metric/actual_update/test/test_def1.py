@@ -206,6 +206,135 @@ def test_def1_print_topk(top_k: int = 5):
 
 
 # ---------------------------------------------------------------------------
+# 头级别测试（使用 TinyHFClassifier）
+# ---------------------------------------------------------------------------
+
+def test_def1_head_granularity_structure():
+    """
+    head_granularity=True 时，compute() 结果包含 head_scores 字段，
+    结构为 {module_name: {"head_0": float, "head_1": float, ...}}，
+    头数量等于 config.num_attention_heads。
+    """
+    from metric.actual_update.test.conftest import TinyHFClassifier, TinyConfig
+
+    cfg   = TinyConfig(hidden_size=8, num_attention_heads=2)
+    model = TinyHFClassifier(cfg)
+    dl    = make_fake_dataloader(batch_size=4, num_batches=8)
+    device = torch.device("cpu")
+
+    theta0 = snapshot_params(model)
+    train_n_steps(model, dl, steps=5, lr=1e-2)
+
+    result = AbsoluteUpdateMetric().compute(
+        theta0, model, device, head_granularity=True
+    )
+
+    assert "head_scores" in result, "head_granularity=True 时结果缺少 head_scores"
+
+    head_scores = result["head_scores"]
+    assert len(head_scores) > 0, "head_scores 为空"
+
+    # 验证每个模块的头数量正确
+    for m_name, per_head in head_scores.items():
+        assert len(per_head) == cfg.num_attention_heads, (
+            f"{m_name}: head 数量={len(per_head)}，期望={cfg.num_attention_heads}"
+        )
+        for h in range(cfg.num_attention_heads):
+            key = f"head_{h}"
+            assert key in per_head, f"{m_name} 缺少 {key}"
+            assert per_head[key] >= 0, f"{m_name}.{key} 为负值: {per_head[key]}"
+
+    print(
+        f"✓ head_granularity: {len(head_scores)} 个注意力模块，"
+        f"每模块 {cfg.num_attention_heads} 头，所有头分数非负"
+    )
+
+
+def test_def1_head_granularity_absent_by_default():
+    """head_granularity=False（默认）时，结果不包含 head_scores 字段。"""
+    from metric.actual_update.test.conftest import TinyHFClassifier
+
+    model = TinyHFClassifier()
+    dl    = make_fake_dataloader(batch_size=4, num_batches=8)
+    device = torch.device("cpu")
+
+    theta0 = snapshot_params(model)
+    train_n_steps(model, dl, steps=3, lr=1e-2)
+
+    result = AbsoluteUpdateMetric().compute(theta0, model, device, head_granularity=False)
+    assert "head_scores" not in result, "head_granularity=False 时不应包含 head_scores"
+    print("✓ head_granularity=False 时结果不含 head_scores（正确）")
+
+
+def test_def1_head_granularity_non_negative():
+    """训练后各头的绝对更新量非负。"""
+    from metric.actual_update.test.conftest import TinyHFClassifier
+
+    model = TinyHFClassifier()
+    dl    = make_fake_dataloader(batch_size=4, num_batches=8)
+    device = torch.device("cpu")
+    theta0 = snapshot_params(model)
+    train_n_steps(model, dl, steps=5, lr=1e-2)
+
+    result = AbsoluteUpdateMetric().compute(theta0, model, device, head_granularity=True)
+
+    for m_name, per_head in result["head_scores"].items():
+        for hk, val in per_head.items():
+            assert val >= 0, f"{m_name}.{hk} 头级别绝对更新量为负: {val}"
+
+    print(f"✓ 头级别绝对更新量全部非负")
+
+
+def test_def1_head_granularity_callback():
+    """callback + head_granularity=True 端到端：JSON 含 head_scores 字段。"""
+    from metric.actual_update.test.conftest import TinyHFClassifier
+
+    model  = TinyHFClassifier()
+    dl     = make_fake_dataloader(batch_size=4, num_batches=8)
+    metric = AbsoluteUpdateMetric()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cb = metric.make_callback(model, save_dir=tmpdir, head_granularity=True)
+        args, state, control = train_n_steps(model, dl, callbacks=[cb], steps=5)
+        fire_train_end([cb], model, args, state, control)
+
+        json_path = os.path.join(tmpdir, f"{metric.name}.json")
+        assert os.path.exists(json_path)
+        with open(json_path) as f:
+            saved = json.load(f)
+
+        assert "head_scores" in saved, "callback JSON 缺少 head_scores"
+        assert len(saved["head_scores"]) > 0
+
+    print(f"✓ callback 端到端（head_granularity=True）：JSON 含 head_scores")
+
+
+def test_def1_head_granularity_print(top_k: int = 3):
+    """打印头级别绝对更新量（供人工核验）。"""
+    from metric.actual_update.test.conftest import TinyHFClassifier, TinyConfig
+
+    cfg   = TinyConfig(hidden_size=8, num_attention_heads=2)
+    model = TinyHFClassifier(cfg)
+    dl    = make_fake_dataloader(batch_size=4, num_batches=8)
+    device = torch.device("cpu")
+
+    theta0 = snapshot_params(model)
+    train_n_steps(model, dl, steps=10, lr=1e-2)
+    result = AbsoluteUpdateMetric().compute(theta0, model, device, head_granularity=True)
+
+    print(f"\n定义一头级别 Top-{top_k} 注意力模块（steps=10, lr=1e-2）：")
+    head_items = sorted(
+        result["head_scores"].items(),
+        key=lambda kv: result["module_scores"].get(kv[0], 0.0),
+        reverse=True,
+    )[:top_k]
+    for m_name, per_head in head_items:
+        mod_score = result["module_scores"].get(m_name, 0.0)
+        head_str = "  ".join(f"h{h}={v:.6f}" for h, v in enumerate(per_head.values()))
+        print(f"  {m_name:<60} module={mod_score:.6f}  {head_str}")
+
+
+# ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
 
@@ -222,4 +351,11 @@ if __name__ == "__main__":
     test_def1_save_load()
     test_def1_callback_end_to_end()
     test_def1_print_topk()
+    print()
+    print("── 头级别（head_granularity）测试 ──")
+    test_def1_head_granularity_structure()
+    test_def1_head_granularity_absent_by_default()
+    test_def1_head_granularity_non_negative()
+    test_def1_head_granularity_callback()
+    test_def1_head_granularity_print()
     print("\n所有测试通过 ✓")

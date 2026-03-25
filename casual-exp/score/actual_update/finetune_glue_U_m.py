@@ -132,6 +132,18 @@ def main():
         "--au_epsilon", type=float, default=1e-8,
         help="def2 数值稳定项 ε，防止除以零（默认 1e-8）。",
     )
+    ap.add_argument(
+        "--au_head_granularity", action="store_true", default=False,
+        help=(
+            "开启注意力头级别粒度计算。\n"
+            "对 def1/def2：在 module_scores 基础上额外计算 head_scores，\n"
+            "  按注意力头维度切分 Δθ（Q/K/V 投影和输出投影），独立评估各头更新量。\n"
+            "对 def3：每步 on_step_end 中按头切片步进 delta 并累积头路径长度，\n"
+            "  峰值内存 ≈ 1 份参数快照（常驻 CPU） + 步进 delta 张量（处理后即释放）。\n"
+            "要求模型具有标准 HuggingFace config（num_attention_heads / hidden_size）。\n"
+            "若模型无 config，自动安全降级（不崩溃，结果不含 head_scores）。"
+        ),
+    )
     # ──────────────────────────────────────────────────────────────────────────
 
     args = ap.parse_args()
@@ -208,15 +220,17 @@ def main():
                 "def2": {"epsilon": args.au_epsilon},
                 "def3": {"log_every": args.au_log_every},
             },
+            head_granularity=args.au_head_granularity,
         )
         _au_callbacks = _au_runner.make_callbacks(
             model,
             save_dir=os.path.join(args.out_dir, "actual_update"),
         )
         all_callbacks.extend(_au_callbacks)
+        head_info = " [+头级别]" if args.au_head_granularity else ""
         print(
             f"[U_m] 已注册 {len(_au_callbacks)} 个 callback："
-            f" {_au_runner.selected_metrics}"
+            f" {_au_runner.selected_metrics}{head_info}"
         )
     # ──────────────────────────────────────────────────────────────────────────
 

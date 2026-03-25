@@ -261,6 +261,140 @@ def test_def3_print_topk(top_k: int = 5):
 
 
 # ---------------------------------------------------------------------------
+# 头级别测试（使用 TinyHFClassifier）
+# ---------------------------------------------------------------------------
+
+def test_def3_head_granularity_structure():
+    """
+    head_granularity=True 时，on_train_end 保存的 JSON 含 head_scores 字段，
+    结构 {module_name: {"head_0": float, "head_1": float, ...}}，
+    头数量等于 config.num_attention_heads。
+    """
+    from metric.actual_update.test.conftest import TinyHFClassifier, TinyConfig
+
+    cfg    = TinyConfig(hidden_size=8, num_attention_heads=2)
+    model  = TinyHFClassifier(cfg)
+    dl     = make_fake_dataloader(batch_size=4, num_batches=8)
+    metric = PathLengthMetric()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cb = metric.make_callback(model, save_dir=tmpdir, head_granularity=True)
+        args, state, control = train_n_steps(model, dl, callbacks=[cb], steps=5)
+        fire_train_end([cb], model, args, state, control)
+
+        json_path = os.path.join(tmpdir, f"{metric.name}.json")
+        with open(json_path) as f:
+            saved = json.load(f)
+
+    assert "head_scores" in saved, "head_granularity=True 时 JSON 缺少 head_scores"
+    assert len(saved["head_scores"]) > 0
+
+    for m_name, per_head in saved["head_scores"].items():
+        assert len(per_head) == cfg.num_attention_heads, (
+            f"{m_name}: 头数量={len(per_head)}，期望={cfg.num_attention_heads}"
+        )
+        for h in range(cfg.num_attention_heads):
+            key = f"head_{h}"
+            assert key in per_head
+            assert per_head[key] >= 0, f"{m_name}.{key} 头路径长度为负: {per_head[key]}"
+
+    print(
+        f"✓ head_granularity（def3）: {len(saved['head_scores'])} 个注意力模块，"
+        f"每模块 {cfg.num_attention_heads} 头，结构正确"
+    )
+
+
+def test_def3_head_granularity_absent_by_default():
+    """head_granularity=False（默认）时，JSON 不含 head_scores。"""
+    from metric.actual_update.test.conftest import TinyHFClassifier
+
+    model  = TinyHFClassifier()
+    dl     = make_fake_dataloader(batch_size=4, num_batches=8)
+    metric = PathLengthMetric()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cb = metric.make_callback(model, save_dir=tmpdir, head_granularity=False)
+        args, state, control = train_n_steps(model, dl, callbacks=[cb], steps=5)
+        fire_train_end([cb], model, args, state, control)
+
+        json_path = os.path.join(tmpdir, f"{metric.name}.json")
+        with open(json_path) as f:
+            saved = json.load(f)
+
+    assert "head_scores" not in saved, "head_granularity=False 时不应含 head_scores"
+    print("✓ head_granularity=False 时 JSON 不含 head_scores（正确）")
+
+
+def test_def3_head_granularity_monotone():
+    """头级别路径长度随训练步数单调非减（逐步验证累积器不减）。"""
+    from metric.actual_update.test.conftest import TinyHFClassifier, TinyConfig
+
+    cfg    = TinyConfig(hidden_size=8, num_attention_heads=2)
+    model  = TinyHFClassifier(cfg)
+    dl     = make_fake_dataloader(batch_size=4, num_batches=16)
+    metric = PathLengthMetric()
+    cb     = metric.make_callback(model, save_dir="/tmp", head_granularity=True)
+
+    args    = FakeArgs()
+    state   = FakeState()
+    control = FakeControl()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    model.train()
+    data_iter = iter(dl)
+
+    # 初始头级别累积器快照
+    prev_head = {
+        m: dict(per_h)
+        for m, per_h in cb._head_acc.items()
+    }
+
+    for step in range(8):
+        try:
+            batch = next(data_iter)
+        except StopIteration:
+            data_iter = iter(dl)
+            batch = next(data_iter)
+
+        optimizer.zero_grad()
+        model(**batch).loss.backward()
+        optimizer.step()
+        cb.on_step_end(args, state, control, model=model)
+
+        for m_name, per_h in cb._head_acc.items():
+            for h, val in per_h.items():
+                prev_val = prev_head[m_name][h]
+                assert val >= prev_val - 1e-9, (
+                    f"步 {step+1}: {m_name}.head_{h} 路径从 {prev_val:.8f} 减小至 {val:.8f}"
+                )
+        prev_head = {m: dict(ph) for m, ph in cb._head_acc.items()}
+
+    print(f"✓ 头级别路径长度单调非减（8步验证通过）")
+
+
+def test_def3_head_granularity_print(top_k: int = 3):
+    """打印头级别路径长度（供人工核验）。"""
+    from metric.actual_update.test.conftest import TinyHFClassifier, TinyConfig
+
+    cfg    = TinyConfig(hidden_size=8, num_attention_heads=2)
+    model  = TinyHFClassifier(cfg)
+    dl     = make_fake_dataloader(batch_size=4, num_batches=16)
+    metric = PathLengthMetric()
+    cb     = metric.make_callback(model, save_dir="/tmp", head_granularity=True)
+    train_n_steps(model, dl, callbacks=[cb], steps=10, lr=1e-2)
+
+    print(f"\n定义三头级别路径长度 Top-{top_k} 注意力模块（steps=10）：")
+    head_items = sorted(
+        cb._head_acc.items(),
+        key=lambda kv: cb._module_acc.get(kv[0], 0.0),
+        reverse=True,
+    )[:top_k]
+    for m_name, per_h in head_items:
+        mod_path = cb._module_acc.get(m_name, 0.0)
+        head_str = "  ".join(f"h{h}={v:.6f}" for h, v in per_h.items())
+        print(f"  {m_name:<60} module={mod_path:.6f}  {head_str}")
+
+
+# ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
 
@@ -277,4 +411,10 @@ if __name__ == "__main__":
     test_def3_save_load()
     test_def3_callback_end_to_end()
     test_def3_print_topk()
+    print()
+    print("── 头级别（head_granularity）测试 ──")
+    test_def3_head_granularity_structure()
+    test_def3_head_granularity_absent_by_default()
+    test_def3_head_granularity_monotone()
+    test_def3_head_granularity_print()
     print("\n所有测试通过 ✓")
