@@ -541,6 +541,7 @@ def main():
 
     # ── 初始化 ───────────────────────────────────────────────────────────────
     os.makedirs(args.out_dir, exist_ok=True)
+    os.environ["WANDB_PROJECT"] = "Fixed-budget"
     torch.manual_seed(args.seed)
 
     tok = AutoTokenizer.from_pretrained(args.model_name, use_fast=False)
@@ -627,6 +628,11 @@ def main():
         seed                        = args.seed,
         bf16                        = use_bf16,
         fp16                        = use_fp16,
+        report_to=["wandb"],
+        run_name=f"FFT-{args.task}-seed{args.seed}-lr{args.lr}-budget{args.budget_ratio}-{args.selection_strategy}",
+        logging_strategy="steps",
+        logging_steps=1,
+        logging_first_step=True,
     )
 
     # ── 构建 Callbacks ────────────────────────────────────────────────────────

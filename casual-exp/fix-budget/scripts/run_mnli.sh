@@ -14,14 +14,14 @@ PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # casual-exp/
 SCRIPT="$PROJ_ROOT/fix-budget/train/finetune_fixed_budget.py"
 OUTBASE="$PROJ_ROOT/fix-budget/outputs"
 
-MODEL=${MODEL:-"microsoft/deberta-v3-base"}
+MODEL=${MODEL:-"/data1/shenth/models/deberta/v3-base"}
 GLUE_DATA_PATH=${GLUE_DATA_PATH:-"/data1/shenth/datasets/glue"}
 
 TASK="MNLI"
 BSZ=64
 EPOCHS=10
-SEED=1
-LR=2e-5
+SEED=42
+LR=1e-5
 MAX_LEN=256
 WARMUP=0.06
 
