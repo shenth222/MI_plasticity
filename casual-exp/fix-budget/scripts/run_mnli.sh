@@ -19,14 +19,14 @@ GLUE_DATA_PATH=${GLUE_DATA_PATH:-"/data1/shenth/datasets/glue"}
 
 TASK="MNLI"
 BSZ=64
-EPOCHS=10
+EPOCHS=1
 SEED=42
-LR=1e-5
+LR=1e-6
 MAX_LEN=256
 WARMUP=0.06
 
-BUDGET_RATIO=0.1     # 10% 注意力头
-RESELECT=0           # 不重新选择（设为正整数开启，如 500）
+BUDGET_RATIO=0.3     # 10% 注意力头
+RESELECT=200           # 不重新选择（设为正整数开启，如 500）
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 公共训练参数

@@ -67,7 +67,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
-
+import wandb
 import torch
 from torch.utils.data import DataLoader
 from transformers import (
@@ -153,6 +153,11 @@ class GlueEvalCallback(TrainerCallback):
             batch_size=self.batch_size,
             device=device,
         )
+
+        # 仅在主进程上打日志
+        if wandb.run is not None:
+            log_dict = {f"eval/{k}": v for k, v in results.items()}
+            wandb.log(log_dict, step=state.global_step)
 
         epoch_log = {"epoch": state.epoch, "step": state.global_step, **results}
         self._epoch_results.append(epoch_log)
@@ -629,7 +634,7 @@ def main():
         bf16                        = use_bf16,
         fp16                        = use_fp16,
         report_to=["wandb"],
-        run_name=f"FFT-{args.task}-seed{args.seed}-lr{args.lr}-budget{args.budget_ratio}-{args.selection_strategy}",
+        run_name=f"FFT-{args.task}-seed{args.seed}-lr{args.lr}-budget{args.budget_ratio}-{args.selection_strategy}-{selector.selector_name}",
         logging_strategy="steps",
         logging_steps=1,
         logging_first_step=True,
