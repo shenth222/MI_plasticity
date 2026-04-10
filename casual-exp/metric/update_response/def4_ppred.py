@@ -132,13 +132,15 @@ class PpredMetric(PreTrainingMetric):
         F_module:      Dict[str, float] = {}
 
         for m_name, params in module_groups.items():
-            g_cat = torch.cat([G[pn].view(-1) for pn in params if pn in G])
-            f_cat = torch.cat([F[pn].view(-1) for pn in params if pn in F])
-            if g_cat.numel() == 0:
+            g_tensors = [G[pn].view(-1) for pn in params if pn in G]
+            f_tensors = [F[pn].view(-1) for pn in params if pn in F]
+            if not g_tensors:
                 module_scores[m_name] = 0.0
                 G_module[m_name] = 0.0
                 F_module[m_name] = 0.0
                 continue
+            g_cat = torch.cat(g_tensors)
+            f_cat = torch.cat(f_tensors)
             ppred_all = g_cat.pow(2) / (f_cat + epsilon)
             module_scores[m_name] = ppred_all.mean().item()
             G_module[m_name]      = g_cat.mean().item()
