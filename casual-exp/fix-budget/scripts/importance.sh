@@ -1,5 +1,4 @@
 set -e
-export CUDA_VISIBLE_DEVICES=2,3
 # ── 基本配置 ─────────────────────────────────────────────────────────────────
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # casual-exp/
 SCRIPT="$PROJ_ROOT/fix-budget/train/finetune_fixed_budget.py"
@@ -34,6 +33,8 @@ COMMON_ARGS=(
   --warmup_ratio   "$WARMUP"
   --budget_ratio   "$BUDGET_RATIO"
   --reselect_every "$RESELECT"
+  --save_steps 500 
+  --save_total_limit 3
 )
 
 # ─────────────────────────────────────────────────────────────────────────────

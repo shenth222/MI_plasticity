@@ -218,9 +218,10 @@ class FixedBudgetCallback(TrainerCallback):
         self._save_dir       = save_dir
         self._device         = device
 
-        self._masker: Optional[GradientMasker]       = None
-        self._selection_log: List[Dict[str, Any]]    = []
+        self._masker: Optional[GradientMasker]            = None
+        self._selection_log: List[Dict[str, Any]]         = []
         self._active_selections: Dict[str, HeadSelection] = {}
+        self._current_selected_set: Optional[Set]         = None   # 断点续跑用
 
         os.makedirs(os.path.join(save_dir, "selections"), exist_ok=True)
 
@@ -249,7 +250,8 @@ class FixedBudgetCallback(TrainerCallback):
         # 使用第一个变体驱动梯度遮蔽
         primary_variant = next(iter(selections))
         primary_sel     = selections[primary_variant]
-        self._active_selections = selections
+        self._active_selections    = selections
+        self._current_selected_set = primary_sel.selected_set  # 断点续跑：记录当前选择
 
         if self._masker is None:
             self._masker = GradientMasker(self._model, primary_sel.selected_set)
@@ -416,6 +418,94 @@ class Def3PhaseCallback(TrainerCallback):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 断点续跑：额外状态随检查点一同保存的 Callback
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ExtraStateCheckpointCallback(TrainerCallback):
+    """
+    在每次 Trainer 保存检查点时，同步将额外训练状态写入同一目录，
+    以支持断点续跑时完整恢复训练现场。
+
+    保存内容（training_extra_state.json）：
+      - global_step / epoch          训练进度
+      - selection_log                完整头选择记录
+      - eval_epoch_results           逐 epoch 评估历史
+      - best_metric                  当前最优评估指标值
+      - active_head_set              当前活跃头集合（GradientMasker 状态）
+      - def3_triggered               def3 阶段是否已切换
+      - def3_head_acc                def3 阶段 1 累积梯度数据（未完成时保存）
+      - def3_steps_collected         def3 已收集步数
+    """
+
+    def __init__(
+        self,
+        budget_callback: "FixedBudgetCallback",
+        eval_callback: "GlueEvalCallback",
+        def3_phase_cb: Optional["Def3PhaseCallback"] = None,
+        early_grad_cb=None,
+    ):
+        self._budget_cb     = budget_callback
+        self._eval_cb       = eval_callback
+        self._def3_phase_cb = def3_phase_cb
+        self._early_grad_cb = early_grad_cb
+
+    def on_save(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ) -> TrainerControl:
+        if not state.is_world_process_zero:
+            return control
+
+        ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+        os.makedirs(ckpt_dir, exist_ok=True)
+
+        # 序列化活跃头集合 Set[Tuple[str, int]] → List[[str, int]]
+        active_head_set = None
+        if self._budget_cb._current_selected_set is not None:
+            active_head_set = [
+                [lk, hi] for lk, hi in self._budget_cb._current_selected_set
+            ]
+
+        # def3 阶段状态
+        def3_triggered       = None
+        def3_head_acc        = None
+        def3_steps_collected = None
+        if self._def3_phase_cb is not None:
+            def3_triggered = self._def3_phase_cb._triggered
+        if self._early_grad_cb is not None:
+            ecb = self._early_grad_cb
+            def3_steps_collected = ecb._steps_collected
+            if not ecb._done:
+                # 阶段 1 尚未完成，保存累积梯度数据以便续跑后继续收集
+                def3_head_acc = {
+                    m: {str(h): float(v) for h, v in heads.items()}
+                    for m, heads in ecb._head_acc.items()
+                }
+
+        extra_state = {
+            "global_step":          state.global_step,
+            "epoch":                state.epoch,
+            "selection_log":        self._budget_cb._selection_log,
+            "eval_epoch_results":   self._eval_cb._epoch_results,
+            "best_metric":          self._eval_cb.best_metric,
+            "active_head_set":      active_head_set,
+            "def3_triggered":       def3_triggered,
+            "def3_head_acc":        def3_head_acc,
+            "def3_steps_collected": def3_steps_collected,
+        }
+
+        fpath = os.path.join(ckpt_dir, "training_extra_state.json")
+        with open(fpath, "w") as f:
+            json.dump(extra_state, f, indent=2)
+        print(f"[ExtraStateCheckpoint] 额外训练状态已保存 → {fpath}")
+
+        return control
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 工具函数
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -542,12 +632,51 @@ def main():
     ap.add_argument("--ur_T_early",      type=int, default=200,
                     help="def3 的梯度累积步数（前 T_early 步全参训练）")
 
+    # ── 断点续跑参数 ─────────────────────────────────────────────────────────
+    ap.add_argument("--save_steps", type=int, default=500,
+                    help="每隔多少训练步保存一次检查点（用于断点续跑，默认 500）")
+    ap.add_argument("--save_total_limit", type=int, default=3,
+                    help="最多保留多少个 Trainer 检查点，旧检查点自动删除（默认 3）")
+    ap.add_argument("--resume_from_checkpoint", type=str, default=None,
+                    help="指定检查点目录路径以恢复训练；"
+                         "留空时自动在 out_dir/trainer_out/ 中查找最新检查点")
+
     args = ap.parse_args()
 
     # ── 初始化 ───────────────────────────────────────────────────────────────
     os.makedirs(args.out_dir, exist_ok=True)
     os.environ["WANDB_PROJECT"] = "Fixed-budget"
     torch.manual_seed(args.seed)
+
+    # ── 断点续跑：自动检测或使用用户指定检查点 ──────────────────────────────
+    resume_ckpt  = args.resume_from_checkpoint
+    resume_state: Dict[str, Any] = {}
+    _trainer_out = os.path.join(args.out_dir, "trainer_out")
+
+    if resume_ckpt is None and os.path.isdir(_trainer_out):
+        _ckpt_names = sorted(
+            [d for d in os.listdir(_trainer_out) if d.startswith("checkpoint-")],
+            key=lambda x: int(x.split("-")[-1]),
+        )
+        if _ckpt_names:
+            resume_ckpt = os.path.join(_trainer_out, _ckpt_names[-1])
+
+    if resume_ckpt:
+        _extra_file = os.path.join(resume_ckpt, "training_extra_state.json")
+        if os.path.isfile(_extra_file):
+            with open(_extra_file) as _f:
+                resume_state = json.load(_f)
+            print(
+                f"[main] ✔ 检测到断点，从 step={resume_state.get('global_step')} "
+                f"(epoch≈{resume_state.get('epoch', 0):.2f}) 继续训练。\n"
+                f"       检查点路径: {resume_ckpt}"
+            )
+        else:
+            print(
+                f"[main] 检测到检查点 {resume_ckpt}，"
+                f"但未找到额外状态文件（training_extra_state.json），"
+                f"将仅恢复模型权重和优化器状态。"
+            )
 
     tok = AutoTokenizer.from_pretrained(args.model_name, use_fast=False)
     ds  = load_glue_dataset(args.task, tok, max_len=args.max_len)
@@ -556,11 +685,14 @@ def main():
         args.model_name, num_labels=ds["num_labels"]
     )
 
-    # 保存 θ₀
+    # 保存 θ₀（续跑时跳过，避免覆盖）
     ckpt_init = os.path.join(args.out_dir, "ckpt_init")
-    model.save_pretrained(ckpt_init)
-    tok.save_pretrained(ckpt_init)
-    print(f"[main] θ₀ 已保存 → {ckpt_init}")
+    if not os.path.isdir(ckpt_init):
+        model.save_pretrained(ckpt_init)
+        tok.save_pretrained(ckpt_init)
+        print(f"[main] θ₀ 已保存 → {ckpt_init}")
+    else:
+        print(f"[main] θ₀ 已存在，跳过保存 → {ckpt_init}")
 
     # ── 计算预算头数 ──────────────────────────────────────────────────────────
     if args.budget_count is not None:
@@ -598,23 +730,31 @@ def main():
     )
 
     # ═════════════════════════════════════════════════════════════════════════
-    # 非 def3 流程：在训练前完成一次性初始选择
+    # 非 def3 流程：在训练前完成一次性初始选择（续跑时从检查点恢复，跳过计算）
     # ═════════════════════════════════════════════════════════════════════════
     initial_selections: Optional[Dict] = None
     if not is_def3:
-        print(f"\n[main] 计算初始头选择（{selector.selector_name}）...")
-        model.eval()
-        try:
-            initial_selections = selector.select(
-                model=model,
-                dataloader=train_dataloader,
-                device=device,
-                budget_count=budget_count,
-                step=0,
-                agg=args.agg,
+        if resume_state.get("active_head_set") is not None:
+            print(
+                f"[main] 续跑模式：跳过初始头选择计算，"
+                f"将从检查点恢复选择状态（活跃头数: "
+                f"{len(resume_state['active_head_set'])}）。"
             )
-        finally:
-            model.train()
+            # initial_selections 保持 None，稍后由恢复逻辑直接重建 masker
+        else:
+            print(f"\n[main] 计算初始头选择（{selector.selector_name}）...")
+            model.eval()
+            try:
+                initial_selections = selector.select(
+                    model=model,
+                    dataloader=train_dataloader,
+                    device=device,
+                    budget_count=budget_count,
+                    step=0,
+                    agg=args.agg,
+                )
+            finally:
+                model.train()
 
     # 无论何种策略，冻结非注意力参数（在 Trainer 创建前调用）
     GradientMasker.freeze_non_attn_params(model)
@@ -629,7 +769,9 @@ def main():
         warmup_ratio                = args.warmup_ratio,
         num_train_epochs            = args.epochs,
         eval_strategy               = "no",
-        save_strategy               = "no",
+        save_strategy               = "steps",          # 断点续跑：按步保存
+        save_steps                  = args.save_steps,
+        save_total_limit            = args.save_total_limit,
         seed                        = args.seed,
         bf16                        = use_bf16,
         fp16                        = use_fp16,
@@ -664,6 +806,8 @@ def main():
     callbacks = [eval_callback, budget_callback]
 
     # ── def3 特殊处理：注册 EarlyGradNormCallback + Def3PhaseCallback ─────────
+    early_grad_cb: Optional[EarlyGradNormCallback] = None
+    def3_phase_cb: Optional[Def3PhaseCallback]     = None
     if is_def3:
         early_grad_cb = EarlyGradNormCallback(
             model=model,
@@ -684,6 +828,15 @@ def main():
             f"之后施加预算选择。"
         )
 
+    # ── 断点续跑：注册额外状态保存 Callback ──────────────────────────────────
+    extra_state_cb = ExtraStateCheckpointCallback(
+        budget_callback = budget_callback,
+        eval_callback   = eval_callback,
+        def3_phase_cb   = def3_phase_cb,
+        early_grad_cb   = early_grad_cb,
+    )
+    callbacks.append(extra_state_cb)
+
     # ── 创建 Trainer ──────────────────────────────────────────────────────────
     trainer = Trainer(
         model         = model,
@@ -697,8 +850,60 @@ def main():
     if not is_def3 and initial_selections is not None:
         budget_callback.apply_initial_selection(initial_selections)
 
+    # ── 断点续跑：恢复额外训练状态 ────────────────────────────────────────────
+    if resume_state:
+        # 恢复评估历史与最优指标
+        eval_callback._epoch_results = resume_state.get("eval_epoch_results", [])
+        eval_callback.best_metric    = resume_state.get("best_metric")
+
+        # 恢复选择日志
+        budget_callback._selection_log = resume_state.get("selection_log", [])
+
+        # 恢复活跃头集合，重建 GradientMasker（hooks 需在 trainer.train() 前注册）
+        saved_head_list = resume_state.get("active_head_set")
+        if saved_head_list is not None:
+            restored_set = {(lk, int(hi)) for lk, hi in saved_head_list}
+            budget_callback._current_selected_set = restored_set
+            budget_callback._masker = GradientMasker(model, restored_set)
+            print(
+                f"[main] 已恢复梯度遮蔽钩子，活跃头数: {len(restored_set)}"
+            )
+
+        # def3 专属状态恢复
+        if is_def3 and early_grad_cb is not None and def3_phase_cb is not None:
+            saved_triggered      = resume_state.get("def3_triggered")
+            saved_head_acc       = resume_state.get("def3_head_acc")
+            saved_steps_collected = resume_state.get("def3_steps_collected", 0) or 0
+
+            if saved_triggered is not None:
+                def3_phase_cb._triggered = saved_triggered
+
+            if saved_head_list is not None:
+                # 阶段 1 已完成：直接标记 EarlyGradNormCallback 为结束状态，移除钩子
+                early_grad_cb._done            = True
+                early_grad_cb._step            = early_grad_cb.T_early
+                early_grad_cb._steps_collected = saved_steps_collected
+                early_grad_cb._remove_hooks()
+                print(
+                    f"[main] def3 阶段 1 已完成（共收集 {saved_steps_collected} 步），"
+                    f"钩子已卸载，梯度遮蔽已激活。"
+                )
+            elif saved_head_acc is not None:
+                # 阶段 1 未完成：恢复累积梯度数据，续跑后继续收集
+                early_grad_cb._head_acc = {
+                    m: {int(h): v for h, v in heads.items()}
+                    for m, heads in saved_head_acc.items()
+                }
+                early_grad_cb._step            = saved_steps_collected
+                early_grad_cb._steps_collected = saved_steps_collected
+                print(
+                    f"[main] def3 阶段 1 未完成，已恢复累积梯度数据"
+                    f"（已收集 {saved_steps_collected}/{args.ur_T_early} 步），"
+                    f"续跑后将继续收集。"
+                )
+
     # ── 训练 ──────────────────────────────────────────────────────────────────
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_ckpt)
 
     # ── 清理 & 保存 ───────────────────────────────────────────────────────────
     eval_callback.save_history(args.out_dir)
