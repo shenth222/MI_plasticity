@@ -1,0 +1,42 @@
+# configs/default.yaml
+# Reference configuration for IP-DEF training (values match the recommendations
+# in the spec; CLI flags override anything here).
+
+task: MNLI
+model_name: /data1/shenth/models/deberta/v3-base
+dataset_path: /data1/shenth/datasets/glue   # local GLUE root for evaluate_glue
+
+training:
+  seed: 42
+  max_len: 256
+  batch_size: 32
+  eval_batch_size: 64
+  lr: 1.0e-5
+  weight_decay: 0.01
+  epochs: 3.0
+  warmup_ratio: 0.06
+  max_grad_norm: 1.0
+  grad_accum: 1
+
+ip_def:
+  budget_ratio: 0.3       # B
+  beta_I: 0.95
+  beta_P: 0.95
+  T0: 300                 # warmup steps before any gating / LR scaling
+  K_c: 100                # active-set reselection period
+  K_I: 100                # sparse calibration period
+  M:   2                  # min-stay periods
+  alpha: 0.5              # exponent for P-based LR scaling
+  r_min: 0.5              # LR scale floor
+  r_max: 2.0              # LR scale ceil
+  lambda_calib: 0.5
+  calib_sample_ratio: 0.10
+  calib_group_size: 4
+
+logging:
+  log_every: 20             # printed/aggregated train-loss window
+  eval_every_steps: 500     # 0 = evaluate only at end of each epoch
+  eval_at_epoch_end: true   # always also evaluate after each epoch
+  save_signals_every: 500
+  wandb_project: IP-DEF
+  # per-step train/loss is always logged to wandb (no flag)
