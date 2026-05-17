@@ -7,7 +7,7 @@ from typing import Dict, List
 
 import numpy as np
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 from scipy.stats import pearsonr
 from torch.utils.data import DataLoader
 from transformers import (
@@ -34,6 +34,10 @@ try:
     import evaluate
 except Exception:  # pragma: no cover - optional dependency fallback
     evaluate = None
+try:
+    import wandb
+except Exception:  # pragma: no cover - optional dependency fallback
+    wandb = None
 
 
 GLUE_TASK_TO_KEYS = {
@@ -52,6 +56,18 @@ GLUE_TASK_TO_KEYS = {
 def parse_args():
     parser = argparse.ArgumentParser(description="IPD-LoRA training for GLUE with DeBERTa-v3-base.")
     parser.add_argument("--task_name", type=str, required=True)
+    parser.add_argument("--dataset_name", type=str, default="glue")
+    parser.add_argument("--dataset_config_name", type=str, default=None)
+    parser.add_argument("--dataset_path", type=str, default=None, help="Local dataset path for load_from_disk.")
+    parser.add_argument("--train_file", type=str, default=None, help="Local train file (csv/json/jsonl).")
+    parser.add_argument(
+        "--validation_file", type=str, default=None, help="Local validation file (csv/json/jsonl)."
+    )
+    parser.add_argument("--local_train_split", type=str, default="train")
+    parser.add_argument("--local_eval_split", type=str, default="validation")
+    parser.add_argument("--text_column1", type=str, default=None)
+    parser.add_argument("--text_column2", type=str, default=None)
+    parser.add_argument("--label_column", type=str, default="label")
     parser.add_argument("--model_name_or_path", type=str, default="microsoft/deberta-v3-base")
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--max_length", type=int, default=128)
@@ -78,6 +94,11 @@ def parse_args():
     parser.add_argument("--calibration_max_batches", type=int, default=16)
     parser.add_argument("--early_stop_patience", type=int, default=3)
     parser.add_argument("--early_stop_i_tolerance", type=float, default=1e-4)
+    parser.add_argument("--report_to_wandb", action="store_true")
+    parser.add_argument("--wandb_project", type=str, default="ipd-lora")
+    parser.add_argument("--wandb_entity", type=str, default=None)
+    parser.add_argument("--wandb_run_name", type=str, default=None)
+    parser.add_argument("--wandb_mode", type=str, default="online", choices=["online", "offline", "disabled"])
     return parser.parse_args()
 
 
@@ -114,17 +135,90 @@ def get_eval_split(task_name: str) -> str:
     return "validation_matched" if task_name == "mnli" else "validation"
 
 
+def _choose_text_keys(args, task: str, train_raw):
+    if args.text_column1 is not None:
+        if args.text_column1 not in train_raw.column_names:
+            raise ValueError(f"text_column1={args.text_column1} not found in dataset columns.")
+        if args.text_column2 is not None and args.text_column2 not in train_raw.column_names:
+            raise ValueError(f"text_column2={args.text_column2} not found in dataset columns.")
+        return args.text_column1, args.text_column2
+
+    if task in GLUE_TASK_TO_KEYS:
+        return GLUE_TASK_TO_KEYS[task]
+
+    # For generic local datasets, auto-detect text columns.
+    candidates = [c for c in train_raw.column_names if c != args.label_column]
+    if len(candidates) < 1:
+        raise ValueError("Cannot infer text columns from local dataset.")
+    if len(candidates) == 1:
+        return candidates[0], None
+    return candidates[0], candidates[1]
+
+
+def load_raw_datasets(args):
+    task = args.task_name.lower()
+
+    if args.dataset_path:
+        raw = load_from_disk(args.dataset_path)
+        return raw
+
+    if args.train_file or args.validation_file:
+        if not args.train_file or not args.validation_file:
+            raise ValueError("When using local files, both --train_file and --validation_file are required.")
+        ext = os.path.splitext(args.train_file)[1].lower()
+        if ext == ".jsonl":
+            dataset_loader = "json"
+        elif ext in [".json", ".csv"]:
+            dataset_loader = ext.lstrip(".")
+        else:
+            raise ValueError(f"Unsupported local file extension: {ext}")
+        raw = load_dataset(dataset_loader, data_files={"train": args.train_file, "validation": args.validation_file})
+        return raw
+
+    dataset_name = args.dataset_name
+    dataset_config = args.dataset_config_name
+    if dataset_name == "glue":
+        config = dataset_config if dataset_config is not None else task
+        return load_dataset("glue", config)
+    if dataset_config is not None:
+        return load_dataset(dataset_name, dataset_config)
+    return load_dataset(dataset_name)
+
+
+def infer_num_labels(train_raw, label_column: str) -> int:
+    feat = train_raw.features.get(label_column, None)
+    if feat is not None and hasattr(feat, "num_classes") and feat.num_classes is not None:
+        return int(feat.num_classes)
+    labels = train_raw[label_column]
+    unique = len(set(labels))
+    if unique < 2:
+        raise ValueError("num_labels inferred < 2. Please check label column.")
+    return unique
+
+
 def prepare_datasets(args, tokenizer):
     task = args.task_name.lower()
-    if task not in GLUE_TASK_TO_KEYS:
-        raise ValueError(f"Unsupported GLUE task: {task}")
-
-    sentence1_key, sentence2_key = GLUE_TASK_TO_KEYS[task]
-    raw = load_dataset("glue", task)
-    train_raw, calib_raw = build_calibration_split(
-        raw["train"], calibration_size=args.calibration_size, seed=args.seed
+    raw = load_raw_datasets(args)
+    train_split = "train" if "train" in raw else args.local_train_split
+    eval_split = (
+        get_eval_split(task)
+        if (args.dataset_name == "glue" and args.dataset_path is None and args.train_file is None)
+        else args.local_eval_split
     )
-    eval_raw = raw[get_eval_split(task)]
+    if train_split not in raw:
+        raise ValueError(f"Train split '{train_split}' not found in dataset.")
+    if eval_split not in raw:
+        raise ValueError(f"Eval split '{eval_split}' not found in dataset.")
+
+    train_raw_base = raw[train_split]
+    eval_raw = raw[eval_split]
+    sentence1_key, sentence2_key = _choose_text_keys(args, task, train_raw_base)
+    if args.label_column not in train_raw_base.column_names:
+        raise ValueError(f"label_column={args.label_column} not found in dataset columns.")
+
+    train_raw, calib_raw = build_calibration_split(
+        train_raw_base, calibration_size=args.calibration_size, seed=args.seed
+    )
 
     def preprocess(examples):
         if sentence2_key is None:
@@ -136,13 +230,13 @@ def prepare_datasets(args, tokenizer):
                 truncation=True,
                 max_length=args.max_length,
             )
-        toks["labels"] = examples["label"]
+        toks["labels"] = examples[args.label_column]
         return toks
 
     train_ds = train_raw.map(preprocess, batched=True, remove_columns=train_raw.column_names)
     calib_ds = calib_raw.map(preprocess, batched=True, remove_columns=calib_raw.column_names)
     eval_ds = eval_raw.map(preprocess, batched=True, remove_columns=eval_raw.column_names)
-    return train_ds, calib_ds, eval_ds, raw
+    return train_ds, calib_ds, eval_ds, raw, train_split
 
 
 def freeze_backbone_except_lora_and_classifier(model):
@@ -162,9 +256,9 @@ def freeze_backbone_except_lora_and_classifier(model):
 
 
 @torch.no_grad()
-def evaluate_model(model, dataloader, device, task_name: str):
+def evaluate_model(model, dataloader, device, task_name: str, use_glue_metric: bool = True):
     model.eval()
-    metric = evaluate.load("glue", task_name) if evaluate is not None else None
+    metric = evaluate.load("glue", task_name) if (evaluate is not None and use_glue_metric) else None
     total_loss = 0.0
     total_n = 0
     all_preds = []
@@ -238,10 +332,24 @@ def main():
     with open(os.path.join(args.output_dir, "config.json"), "w", encoding="utf-8") as f:
         json.dump(vars(args), f, ensure_ascii=False, indent=2)
 
+    use_wandb = bool(args.report_to_wandb and args.wandb_mode != "disabled")
+    if use_wandb and wandb is None:
+        print("[warn] report_to_wandb is enabled but wandb is not installed. Logging falls back to local files only.")
+        use_wandb = False
+    if use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name,
+            mode=args.wandb_mode,
+            dir=args.output_dir,
+            config=vars(args),
+        )
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-    train_ds, calib_ds, eval_ds, raw = prepare_datasets(args, tokenizer)
-    num_labels = raw["train"].features["label"].num_classes
+    train_ds, calib_ds, eval_ds, raw, train_split = prepare_datasets(args, tokenizer)
+    num_labels = infer_num_labels(raw[train_split], args.label_column)
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name_or_path, num_labels=num_labels
     )
@@ -357,6 +465,7 @@ def main():
                     beta_I=args.beta_I,
                     max_batches=args.calibration_max_batches,
                 )
+
                 update_quadrants_and_budget(
                     lora_module_dict=lora_module_dict,
                     total_rank_budget=args.total_rank_budget,
@@ -419,11 +528,28 @@ def main():
                     f"[train] step={global_step} epoch={epoch} loss={avg_train_loss:.4f} "
                     f"lr={lr:.3e} active_rank={active_total_rank} frozen={frozen_module_count}"
                 )
+                if use_wandb:
+                    wandb.log(
+                        {
+                            "train/loss": float(avg_train_loss),
+                            "train/lr": lr,
+                            "train/active_total_rank": int(active_total_rank),
+                            "train/active_module_count": int(active_module_count),
+                            "train/frozen_module_count": int(frozen_module_count),
+                            "epoch": int(epoch),
+                        },
+                        step=global_step,
+                    )
                 running_loss = 0.0
                 running_steps = 0
 
             if args.eval_steps > 0 and global_step % args.eval_steps == 0:
-                eval_loss, eval_accuracy, _ = evaluate_model(model, eval_loader, device, task_name)
+                use_glue_metric = (
+                    args.dataset_name == "glue" and args.dataset_path is None and args.train_file is None
+                )
+                eval_loss, eval_accuracy, _ = evaluate_model(
+                    model, eval_loader, device, task_name, use_glue_metric=use_glue_metric
+                )
                 last_eval_loss, last_eval_accuracy = eval_loss, eval_accuracy
                 write_jsonl(
                     training_log_path,
@@ -440,6 +566,15 @@ def main():
                     },
                 )
                 print(f"[eval] step={global_step} eval_loss={eval_loss:.4f} eval_acc={eval_accuracy:.4f}")
+                if use_wandb:
+                    wandb.log(
+                        {
+                            "eval/loss": float(eval_loss),
+                            "eval/accuracy": float(eval_accuracy),
+                            "eval/best_accuracy": float(max(best_eval_accuracy, eval_accuracy)),
+                        },
+                        step=global_step,
+                    )
                 if eval_accuracy > best_eval_accuracy:
                     best_eval_accuracy = eval_accuracy
                     best_eval_loss = eval_loss
@@ -449,7 +584,10 @@ def main():
                     tokenizer.save_pretrained(best_dir)
                 maybe_save_checkpoint(args, model, tokenizer, global_step)
 
-    final_eval_loss, final_eval_accuracy, _ = evaluate_model(model, eval_loader, device, task_name)
+    use_glue_metric = args.dataset_name == "glue" and args.dataset_path is None and args.train_file is None
+    final_eval_loss, final_eval_accuracy, _ = evaluate_model(
+        model, eval_loader, device, task_name, use_glue_metric=use_glue_metric
+    )
     final_dir = os.path.join(args.output_dir, "final_model")
     ensure_dir(final_dir)
     model.save_pretrained(final_dir)
@@ -474,6 +612,18 @@ def main():
     }
     with open(os.path.join(args.output_dir, "eval_results.json"), "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
+
+    if use_wandb:
+        wandb.log(
+            {
+                "final/loss": float(final_eval_loss),
+                "final/accuracy": float(final_eval_accuracy),
+                "final/best_accuracy": float(best_eval_accuracy),
+                "final/active_total_rank": int(final_active_total_rank),
+            },
+            step=global_step,
+        )
+        wandb.finish()
 
     print("[done] Training finished.")
     print(json.dumps(results, ensure_ascii=False, indent=2))
