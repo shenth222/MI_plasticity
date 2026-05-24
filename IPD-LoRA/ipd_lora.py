@@ -1,6 +1,5 @@
 import math
 import re
-from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -110,6 +109,8 @@ class IPDLoRALinear(nn.Module):
         self.P_rank = 0
         self.low_P_counter = 0
         self.prev_ema_I = 0.0
+        self.freeze_step = -1
+        self.freeze_cycles = 0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         base_out = self.base_linear(x)
@@ -246,6 +247,9 @@ def compute_importance_scores(
     device: torch.device,
     beta_I: float = 0.9,
     max_batches: Optional[int] = None,
+    module_subset_names: Optional[Sequence[str]] = None,
+    group_size: int = 1,
+    exact: bool = True,
 ) -> Dict[str, float]:
     """
     Importance is computed by forward ablation on calibration data:
@@ -258,16 +262,56 @@ def compute_importance_scores(
     baseline_loss = _avg_loss_over_loader(model, calibration_dataloader, device, max_batches=max_batches)
     scores: Dict[str, float] = {}
 
-    for module_name, module in lora_module_dict.items():
-        old_rank = int(module.active_rank)
-        module.active_rank = 0
-        ablated_loss = _avg_loss_over_loader(model, calibration_dataloader, device, max_batches=max_batches)
-        module.active_rank = old_rank
+    if module_subset_names is None:
+        candidate_names = list(lora_module_dict.keys())
+    else:
+        candidate_names = [n for n in module_subset_names if n in lora_module_dict]
+    if len(candidate_names) == 0:
+        return scores
 
-        score = float(ablated_loss - baseline_loss)
-        module.current_I = score
-        module.ema_I = beta_I * module.ema_I + (1.0 - beta_I) * score
-        scores[module_name] = score
+    if exact or group_size <= 1:
+        for module_name in candidate_names:
+            module = lora_module_dict[module_name]
+            old_rank = int(module.active_rank)
+            module.active_rank = 0
+            ablated_loss = _avg_loss_over_loader(model, calibration_dataloader, device, max_batches=max_batches)
+            module.active_rank = old_rank
+
+            score = float(ablated_loss - baseline_loss)
+            module.current_I = score
+            module.ema_I = beta_I * module.ema_I + (1.0 - beta_I) * score
+            scores[module_name] = score
+        return scores
+
+    # Grouped approximation: evaluate group ablation once, then distribute score by module proxy cost.
+    g = max(1, int(group_size))
+    for start in range(0, len(candidate_names), g):
+        group_names = candidate_names[start : start + g]
+        old_ranks = []
+        cost_by_name: Dict[str, float] = {}
+        denom = 0.0
+        for module_name in group_names:
+            module = lora_module_dict[module_name]
+            old_rank = int(module.active_rank)
+            old_ranks.append((module_name, old_rank))
+            proxy_cost = float(max(1, old_rank * (module.in_features + module.out_features)))
+            cost_by_name[module_name] = proxy_cost
+            denom += proxy_cost
+            module.active_rank = 0
+
+        ablated_loss = _avg_loss_over_loader(model, calibration_dataloader, device, max_batches=max_batches)
+        group_score = float(ablated_loss - baseline_loss)
+        if denom <= 0:
+            denom = float(max(1, len(group_names)))
+
+        for module_name, old_rank in old_ranks:
+            module = lora_module_dict[module_name]
+            module.active_rank = old_rank
+            weight = float(cost_by_name.get(module_name, 1.0)) / denom
+            score = group_score * weight
+            module.current_I = score
+            module.ema_I = beta_I * module.ema_I + (1.0 - beta_I) * score
+            scores[module_name] = score
     return scores
 
 
@@ -320,6 +364,9 @@ def update_quadrants_and_budget(
     lora_module_dict: Dict[str, IPDLoRALinear],
     total_rank_budget: int,
     active_rank_choices: Sequence[int],
+    target_rank: int = 4,
+    high_i_min_rank: Optional[int] = None,
+    avoid_zero_rank: bool = True,
 ) -> Dict[str, Dict[str, float]]:
     modules = list(lora_module_dict.values())
     if not modules:
@@ -337,14 +384,17 @@ def update_quadrants_and_budget(
     for r, m in enumerate(sorted_P, start=1):
         m.P_rank = r
 
-    # Quadrant default policy:
-    # - high_I_low_P should be retained but updated less often (preserve useful function, avoid noisy over-optimization).
-    # - low_I_high_P stays as exploration region (small rank but frequent updates to test future utility).
+    base_rank = int(max(1, target_rank))
+    min_high_i_rank = int(base_rank if high_i_min_rank is None else max(0, high_i_min_rank))
+
+    # Target-rank-aware default policy:
+    # - high-I modules are retained around target rank (or slightly above for high-I/high-P).
+    # - low-I modules still keep small non-zero rank when avoid_zero_rank=True.
     default_rank = {
-        "high_I_high_P": 8,
-        "high_I_low_P": 4,
-        "low_I_high_P": 2,
-        "low_I_low_P": 0,
+        "high_I_high_P": base_rank + 1,
+        "high_I_low_P": base_rank,
+        "low_I_high_P": max(1, base_rank - 1),
+        "low_I_low_P": max(1 if avoid_zero_rank else 0, base_rank - 2),
     }
     default_interval = {
         "high_I_high_P": 1,
@@ -374,6 +424,8 @@ def update_quadrants_and_budget(
             q = "low_I_low_P"
         m.quadrant = q
         m.target_rank = _round_to_choice(default_rank[q], active_rank_choices)
+        if high_I:
+            m.target_rank = max(m.target_rank, _round_to_choice(min_high_i_rank, active_rank_choices))
         m.update_interval = int(default_interval[q])
 
     def _current_total() -> int:
@@ -396,7 +448,12 @@ def update_quadrants_and_budget(
                     if _current_total() <= budget:
                         break
                     lower = _next_lower_choice(m.target_rank, active_rank_choices)
-                    if lower < m.target_rank:
+                    min_keep = 0
+                    if avoid_zero_rank:
+                        min_keep = 1
+                    if m.I_z >= 0.0:
+                        min_keep = max(min_keep, _round_to_choice(min_high_i_rank, active_rank_choices))
+                    if lower < m.target_rank and lower >= min_keep:
                         m.target_rank = int(lower)
                         changed = True
                 if not changed:
@@ -424,16 +481,36 @@ def update_quadrants_and_budget(
 
 def apply_module_early_stopping(
     lora_module_dict: Dict[str, IPDLoRALinear],
+    global_step: int,
     patience: int = 3,
     p_low_threshold: float = -0.5,
     i_tolerance: float = 1e-4,
+    unfreeze_interval: int = 0,
+    max_freeze_cycles: int = 2,
+    unfreeze_rank: int = 1,
 ) -> None:
     for module in lora_module_dict.values():
         if module.frozen_by_early_stop:
-            continue
+            can_unfreeze = (
+                unfreeze_interval > 0
+                and module.freeze_step >= 0
+                and (int(global_step) - int(module.freeze_step) >= int(unfreeze_interval))
+                and module.freeze_cycles < int(max_freeze_cycles)
+            )
+            if can_unfreeze:
+                module.frozen_by_early_stop = False
+                module.quadrant = "thawed"
+                module.update_interval = 1
+                module.active_rank = max(int(module.active_rank), int(unfreeze_rank))
+                module.target_rank = int(module.active_rank)
+                module.low_P_counter = 0
+                module.prev_ema_I = float(module.ema_I)
+            else:
+                continue
         low_plasticity = module.P_z < p_low_threshold
         no_importance_growth = module.ema_I <= (module.prev_ema_I + i_tolerance)
-        if low_plasticity and no_importance_growth:
+        low_importance_region = module.I_z < 0.0
+        if low_plasticity and no_importance_growth and low_importance_region:
             module.low_P_counter += 1
         else:
             module.low_P_counter = 0
@@ -442,6 +519,8 @@ def apply_module_early_stopping(
             module.frozen_by_early_stop = True
             module.update_interval = NEVER_UPDATE_INTERVAL
             module.quadrant = "frozen"
+            module.freeze_step = int(global_step)
+            module.freeze_cycles += 1
         module.prev_ema_I = float(module.ema_I)
 
 
@@ -494,6 +573,8 @@ def collect_module_rows(
                 "update_interval": int(m.update_interval),
                 "frozen_by_early_stop": bool(m.frozen_by_early_stop),
                 "low_P_counter": int(m.low_P_counter),
+                "freeze_step": int(m.freeze_step),
+                "freeze_cycles": int(m.freeze_cycles),
             }
         )
     return rows

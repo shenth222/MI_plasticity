@@ -3,6 +3,7 @@ import csv
 import json
 import os
 import random
+import time
 from typing import Dict, List
 
 import numpy as np
@@ -18,10 +19,8 @@ from transformers import (
 )
 
 from ipd_lora import (
-    NEVER_UPDATE_INTERVAL,
     apply_module_early_stopping,
     apply_update_frequency_mask,
-    build_calibration_split,
     collect_module_rows,
     compute_importance_scores,
     compute_plasticity_scores,
@@ -83,22 +82,36 @@ def parse_args():
     parser.add_argument("--lora_alpha", type=int, default=16)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--score_interval", type=int, default=100)
+    parser.add_argument("--importance_update_interval", type=int, default=2)
+    parser.add_argument("--importance_exact_interval", type=int, default=6)
+    parser.add_argument("--importance_group_size", type=int, default=4)
+    parser.add_argument("--score_module_batch_size", type=int, default=8)
     parser.add_argument("--warmup_steps_for_ipd", type=int, default=100)
     parser.add_argument("--calibration_size", type=int, default=256)
-    parser.add_argument("--total_rank_budget", type=int, default=96)
+    parser.add_argument("--calibration_resample_stride", type=int, default=9973)
+    parser.add_argument("--total_rank_budget", type=int, default=0)
+    parser.add_argument("--target_rank", type=int, default=4)
+    parser.add_argument("--high_i_min_rank", type=int, default=-1)
+    parser.add_argument("--avoid_zero_rank", action="store_true")
     parser.add_argument("--beta_I", type=float, default=0.9)
     parser.add_argument("--beta_P", type=float, default=0.9)
+    parser.add_argument("--tfinal_steps", type=int, default=0)
+    parser.add_argument("--tfinal_ratio", type=float, default=0.1)
     parser.add_argument("--logging_steps", type=int, default=20)
     parser.add_argument("--eval_steps", type=int, default=100)
     parser.add_argument("--save_steps", type=int, default=0)
     parser.add_argument("--calibration_max_batches", type=int, default=16)
     parser.add_argument("--early_stop_patience", type=int, default=3)
     parser.add_argument("--early_stop_i_tolerance", type=float, default=1e-4)
+    parser.add_argument("--early_stop_unfreeze_interval", type=int, default=3)
+    parser.add_argument("--early_stop_max_freeze_cycles", type=int, default=2)
+    parser.add_argument("--early_stop_unfreeze_rank", type=int, default=1)
     parser.add_argument("--report_to_wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="ipd-lora")
     parser.add_argument("--wandb_entity", type=str, default=None)
     parser.add_argument("--wandb_run_name", type=str, default=None)
     parser.add_argument("--wandb_mode", type=str, default="online", choices=["online", "offline", "disabled"])
+    parser.set_defaults(avoid_zero_rank=True)
     return parser.parse_args()
 
 
@@ -200,25 +213,28 @@ def prepare_datasets(args, tokenizer):
     task = args.task_name.lower()
     raw = load_raw_datasets(args)
     train_split = "train" if "train" in raw else args.local_train_split
-    eval_split = (
-        get_eval_split(task)
-        if (args.dataset_name == "glue" and args.dataset_path is None and args.train_file is None)
-        else args.local_eval_split
-    )
+    use_builtin_glue = args.dataset_name == "glue" and args.dataset_path is None and args.train_file is None
+    eval_split = get_eval_split(task) if use_builtin_glue else args.local_eval_split
     if train_split not in raw:
         raise ValueError(f"Train split '{train_split}' not found in dataset.")
-    if eval_split not in raw:
-        raise ValueError(f"Eval split '{eval_split}' not found in dataset.")
+    if task == "mnli" and use_builtin_glue:
+        required = ["validation_matched", "validation_mismatched"]
+        for s in required:
+            if s not in raw:
+                raise ValueError(f"Eval split '{s}' not found in dataset.")
+        eval_raw_dict = {
+            "matched": raw["validation_matched"],
+            "mismatched": raw["validation_mismatched"],
+        }
+    else:
+        if eval_split not in raw:
+            raise ValueError(f"Eval split '{eval_split}' not found in dataset.")
+        eval_raw_dict = {"validation": raw[eval_split]}
 
     train_raw_base = raw[train_split]
-    eval_raw = raw[eval_split]
     sentence1_key, sentence2_key = _choose_text_keys(args, task, train_raw_base)
     if args.label_column not in train_raw_base.column_names:
         raise ValueError(f"label_column={args.label_column} not found in dataset columns.")
-
-    train_raw, calib_raw = build_calibration_split(
-        train_raw_base, calibration_size=args.calibration_size, seed=args.seed
-    )
 
     def preprocess(examples):
         if sentence2_key is None:
@@ -233,10 +249,12 @@ def prepare_datasets(args, tokenizer):
         toks["labels"] = examples[args.label_column]
         return toks
 
-    train_ds = train_raw.map(preprocess, batched=True, remove_columns=train_raw.column_names)
-    calib_ds = calib_raw.map(preprocess, batched=True, remove_columns=calib_raw.column_names)
-    eval_ds = eval_raw.map(preprocess, batched=True, remove_columns=eval_raw.column_names)
-    return train_ds, calib_ds, eval_ds, raw, train_split
+    train_ds = train_raw_base.map(preprocess, batched=True, remove_columns=train_raw_base.column_names)
+    eval_ds_dict = {
+        split_name: ds.map(preprocess, batched=True, remove_columns=ds.column_names)
+        for split_name, ds in eval_raw_dict.items()
+    }
+    return train_ds, eval_ds_dict, raw, train_split
 
 
 def freeze_backbone_except_lora_and_classifier(model):
@@ -263,7 +281,10 @@ def evaluate_model(model, dataloader, device, task_name: str, use_glue_metric: b
     total_n = 0
     all_preds = []
     all_refs = []
+    eval_start = time.perf_counter()
+    num_eval_steps = 0
     for batch in dataloader:
+        num_eval_steps += 1
         batch = {k: v.to(device) for k, v in batch.items()}
         outputs = model(**batch)
         loss = float(outputs.loss.item())
@@ -303,7 +324,100 @@ def evaluate_model(model, dataloader, device, task_name: str, use_glue_metric: b
     else:
         # Fallback for tasks that might not expose accuracy directly.
         acc = float(next(iter(scores.values())))
-    return avg_loss, acc, scores
+    runtime = float(max(time.perf_counter() - eval_start, 1e-12))
+    samples_per_second = float(total_n / runtime)
+    steps_per_second = float(num_eval_steps / runtime)
+    perf = {
+        "runtime": runtime,
+        "samples_per_second": samples_per_second,
+        "steps_per_second": steps_per_second,
+    }
+    return avg_loss, acc, scores, perf
+
+
+def build_random_calibration_loader(
+    train_ds,
+    data_collator,
+    batch_size: int,
+    calibration_size: int,
+    seed: int,
+    step: int,
+    stride: int,
+):
+    n_total = len(train_ds)
+    if n_total <= 1:
+        raise ValueError("Training dataset too small for calibration resampling.")
+    n = int(max(1, min(calibration_size, n_total)))
+    rng = np.random.default_rng(int(seed) + int(step) * int(max(1, stride)))
+    indices = rng.choice(n_total, size=n, replace=False)
+    subset = train_ds.select(indices.tolist())
+    return DataLoader(
+        subset,
+        shuffle=False,
+        collate_fn=data_collator,
+        batch_size=batch_size,
+    )
+
+
+def evaluate_all_splits(model, eval_loaders, device, task_name: str, use_glue_metric: bool = True):
+    split_results = {}
+    for split_name, loader in eval_loaders.items():
+        loss, primary_metric, scores, perf = evaluate_model(
+            model, loader, device, task_name, use_glue_metric=use_glue_metric
+        )
+        split_results[split_name] = {
+            "loss": float(loss),
+            "primary_metric": float(primary_metric),
+            "scores": {k: float(v) for k, v in scores.items()},
+            "perf": {k: float(v) for k, v in perf.items()},
+        }
+    return split_results
+
+
+def build_eval_wandb_payload(
+    split_results: Dict[str, Dict],
+    task_name: str,
+    best_eval_accuracy: float,
+    eval_accuracy: float,
+    eval_loss: float,
+) -> Dict[str, float]:
+    payload: Dict[str, float] = {
+        "eval/primary_metric": float(eval_accuracy),
+        "eval/best_primary_metric": float(max(best_eval_accuracy, eval_accuracy)),
+    }
+
+    # 与 LoRA/AdaLoRA 对齐：
+    # - 非 MNLI: eval/accuracy, eval/f1, eval/loss, eval/runtime...
+    # - MNLI: eval/matched_accuracy, eval/mismatched_accuracy, ...
+    if task_name == "mnli":
+        for split_name, split_row in split_results.items():
+            payload[f"eval/{split_name}_loss"] = float(split_row["loss"])
+            for perf_name, perf_val in split_row.get("perf", {}).items():
+                payload[f"eval/{split_name}_{perf_name}"] = float(perf_val)
+            for metric_name, metric_value in split_row["scores"].items():
+                payload[f"eval/{split_name}_{metric_name}"] = float(metric_value)
+        return payload
+
+    # 单验证集任务使用不带 split 前缀的键名
+    first_split = sorted(split_results.keys())[0] if split_results else "validation"
+    split_row = split_results.get(first_split, {"scores": {}, "perf": {}})
+    payload["eval/loss"] = float(eval_loss)
+    for perf_name, perf_val in split_row.get("perf", {}).items():
+        payload[f"eval/{perf_name}"] = float(perf_val)
+    for metric_name, metric_value in split_row.get("scores", {}).items():
+        payload[f"eval/{metric_name}"] = float(metric_value)
+    return payload
+
+
+def choose_primary_eval(split_results: Dict[str, Dict], task_name: str):
+    if len(split_results) == 0:
+        return "validation", 0.0, 0.0
+    if task_name == "mnli" and "matched" in split_results:
+        ref = split_results["matched"]
+        return "matched", float(ref["primary_metric"]), float(ref["loss"])
+    first_split = sorted(split_results.keys())[0]
+    ref = split_results[first_split]
+    return first_split, float(ref["primary_metric"]), float(ref["loss"])
 
 
 def active_rank_stats(lora_module_dict):
@@ -348,7 +462,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-    train_ds, calib_ds, eval_ds, raw, train_split = prepare_datasets(args, tokenizer)
+    train_ds, eval_ds_dict, raw, train_split = prepare_datasets(args, tokenizer)
     num_labels = infer_num_labels(raw[train_split], args.label_column)
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name_or_path, num_labels=num_labels
@@ -375,18 +489,15 @@ def main():
         collate_fn=data_collator,
         batch_size=args.per_device_train_batch_size,
     )
-    calib_loader = DataLoader(
-        calib_ds,
-        shuffle=False,
-        collate_fn=data_collator,
-        batch_size=args.per_device_eval_batch_size,
-    )
-    eval_loader = DataLoader(
-        eval_ds,
-        shuffle=False,
-        collate_fn=data_collator,
-        batch_size=args.per_device_eval_batch_size,
-    )
+    eval_loaders = {
+        split_name: DataLoader(
+            ds,
+            shuffle=False,
+            collate_fn=data_collator,
+            batch_size=args.per_device_eval_batch_size,
+        )
+        for split_name, ds in eval_ds_dict.items()
+    }
 
     optimizer_grouped = [
         {"params": [p for p in model.parameters() if p.requires_grad], "weight_decay": args.weight_decay}
@@ -421,15 +532,27 @@ def main():
 
     # Warmup phase for IPD policy: all modules update every step, no dynamic reallocation.
     for module in lora_module_dict.values():
-        module.active_rank = min(args.initial_active_rank, args.max_lora_rank)
+        module.active_rank = max(1, min(args.initial_active_rank, args.max_lora_rank))
         module.target_rank = module.active_rank
         module.update_interval = 1
         module.quadrant = "warmup"
 
-    active_rank_choices = [c for c in [0, 1, 2, 4, 8, 16] if c <= args.max_lora_rank]
-    if args.max_lora_rank not in active_rank_choices:
-        active_rank_choices.append(args.max_lora_rank)
-    active_rank_choices = sorted(set(active_rank_choices))
+    # Rank adjustment granularity = 1.
+    active_rank_choices = list(range(0, int(args.max_lora_rank) + 1))
+
+    n_lora_modules = len(lora_module_dict)
+    target_rank_budget = int(max(1, args.target_rank)) * int(max(1, n_lora_modules))
+    if args.total_rank_budget > 0:
+        # Keep final average rank <= target_rank.
+        effective_rank_budget = min(int(args.total_rank_budget), target_rank_budget)
+    else:
+        effective_rank_budget = target_rank_budget
+    high_i_min_rank = int(args.target_rank if args.high_i_min_rank < 0 else args.high_i_min_rank)
+
+    tfinal_steps = int(args.tfinal_steps) if args.tfinal_steps > 0 else int(args.tfinal_ratio * num_training_steps)
+    tfinal_steps = max(0, min(tfinal_steps, num_training_steps))
+    rank_adapt_end_step = max(0, num_training_steps - tfinal_steps)
+    score_event_idx = 0
 
     for epoch in range(args.num_train_epochs):
         model.train()
@@ -448,34 +571,75 @@ def main():
                 global_step > args.warmup_steps_for_ipd
                 and args.score_interval > 0
                 and global_step % args.score_interval == 0
+                and global_step <= rank_adapt_end_step
             )
             if do_scoring:
+                score_event_idx += 1
+                calib_loader = build_random_calibration_loader(
+                    train_ds=train_ds,
+                    data_collator=data_collator,
+                    batch_size=args.per_device_eval_batch_size,
+                    calibration_size=args.calibration_size,
+                    seed=args.seed,
+                    step=global_step,
+                    stride=args.calibration_resample_stride,
+                )
+
                 # P measures AdamW-aware expected marginal gain for each module.
                 compute_plasticity_scores(
                     lora_module_dict=lora_module_dict,
                     optimizer=optimizer,
                     beta_P=args.beta_P,
                 )
-                # I uses forward ablation on calibration set to evaluate retained value.
-                compute_importance_scores(
-                    model=model,
-                    lora_module_dict=lora_module_dict,
-                    calibration_dataloader=calib_loader,
-                    device=device,
-                    beta_I=args.beta_I,
-                    max_batches=args.calibration_max_batches,
-                )
+
+                # Sparse + grouped I scoring:
+                # - update I every K scoring events
+                # - evaluate only a subset of modules each event
+                # - grouped ablation approximation between exact refreshes
+                if args.importance_update_interval <= 1 or score_event_idx % args.importance_update_interval == 0:
+                    module_names = sorted(lora_module_dict.keys())
+                    if 0 < args.score_module_batch_size < len(module_names):
+                        window = int(args.score_module_batch_size)
+                        sparse_idx = (score_event_idx // max(1, args.importance_update_interval)) - 1
+                        start = (max(0, sparse_idx) * window) % len(module_names)
+                        selected = module_names[start : start + window]
+                        if len(selected) < window:
+                            selected = selected + module_names[: (window - len(selected))]
+                    else:
+                        selected = module_names
+                    use_exact_importance = (
+                        args.importance_exact_interval <= 1
+                        or score_event_idx % args.importance_exact_interval == 0
+                    )
+                    compute_importance_scores(
+                        model=model,
+                        lora_module_dict=lora_module_dict,
+                        calibration_dataloader=calib_loader,
+                        device=device,
+                        beta_I=args.beta_I,
+                        max_batches=args.calibration_max_batches,
+                        module_subset_names=selected,
+                        group_size=max(1, int(args.importance_group_size)),
+                        exact=bool(use_exact_importance),
+                    )
 
                 update_quadrants_and_budget(
                     lora_module_dict=lora_module_dict,
-                    total_rank_budget=args.total_rank_budget,
+                    total_rank_budget=effective_rank_budget,
                     active_rank_choices=active_rank_choices,
+                    target_rank=args.target_rank,
+                    high_i_min_rank=high_i_min_rank,
+                    avoid_zero_rank=bool(args.avoid_zero_rank),
                 )
                 apply_module_early_stopping(
                     lora_module_dict=lora_module_dict,
+                    global_step=global_step,
                     patience=args.early_stop_patience,
                     p_low_threshold=-0.5,
                     i_tolerance=args.early_stop_i_tolerance,
+                    unfreeze_interval=max(0, int(args.early_stop_unfreeze_interval)) * max(1, args.score_interval),
+                    max_freeze_cycles=args.early_stop_max_freeze_cycles,
+                    unfreeze_rank=max(1, int(args.early_stop_unfreeze_rank)),
                 )
                 module_rows = collect_module_rows(lora_module_dict, global_step)
                 for row in module_rows:
@@ -547,9 +711,14 @@ def main():
                 use_glue_metric = (
                     args.dataset_name == "glue" and args.dataset_path is None and args.train_file is None
                 )
-                eval_loss, eval_accuracy, _ = evaluate_model(
-                    model, eval_loader, device, task_name, use_glue_metric=use_glue_metric
+                split_results = evaluate_all_splits(
+                    model=model,
+                    eval_loaders=eval_loaders,
+                    device=device,
+                    task_name=task_name,
+                    use_glue_metric=use_glue_metric,
                 )
+                primary_split, eval_accuracy, eval_loss = choose_primary_eval(split_results, task_name=task_name)
                 last_eval_loss, last_eval_accuracy = eval_loss, eval_accuracy
                 write_jsonl(
                     training_log_path,
@@ -563,16 +732,24 @@ def main():
                         "active_total_rank": int(active_total_rank),
                         "active_module_count": int(active_module_count),
                         "frozen_module_count": int(frozen_module_count),
+                        "eval_primary_split": primary_split,
+                        "eval_split_results": split_results,
                     },
                 )
-                print(f"[eval] step={global_step} eval_loss={eval_loss:.4f} eval_acc={eval_accuracy:.4f}")
+                print(
+                    f"[eval] step={global_step} primary_split={primary_split} "
+                    f"eval_loss={eval_loss:.4f} eval_metric={eval_accuracy:.4f}"
+                )
                 if use_wandb:
+                    eval_log_payload = build_eval_wandb_payload(
+                        split_results=split_results,
+                        task_name=task_name,
+                        best_eval_accuracy=best_eval_accuracy,
+                        eval_accuracy=eval_accuracy,
+                        eval_loss=eval_loss,
+                    )
                     wandb.log(
-                        {
-                            "eval/loss": float(eval_loss),
-                            "eval/accuracy": float(eval_accuracy),
-                            "eval/best_accuracy": float(max(best_eval_accuracy, eval_accuracy)),
-                        },
+                        eval_log_payload,
                         step=global_step,
                     )
                 if eval_accuracy > best_eval_accuracy:
@@ -585,8 +762,15 @@ def main():
                 maybe_save_checkpoint(args, model, tokenizer, global_step)
 
     use_glue_metric = args.dataset_name == "glue" and args.dataset_path is None and args.train_file is None
-    final_eval_loss, final_eval_accuracy, _ = evaluate_model(
-        model, eval_loader, device, task_name, use_glue_metric=use_glue_metric
+    final_split_results = evaluate_all_splits(
+        model=model,
+        eval_loaders=eval_loaders,
+        device=device,
+        task_name=task_name,
+        use_glue_metric=use_glue_metric,
+    )
+    final_primary_split, final_eval_accuracy, final_eval_loss = choose_primary_eval(
+        final_split_results, task_name=task_name
     )
     final_dir = os.path.join(args.output_dir, "final_model")
     ensure_dir(final_dir)
@@ -600,12 +784,18 @@ def main():
     results = {
         "task_name": task_name,
         "seed": int(args.seed),
+        "best_eval_primary_metric": float(best_eval_accuracy),
         "best_eval_accuracy": float(best_eval_accuracy),
         "best_eval_loss": float(best_eval_loss),
+        "final_eval_primary_metric": float(final_eval_accuracy),
         "final_eval_accuracy": float(final_eval_accuracy),
         "final_eval_loss": float(final_eval_loss),
+        "final_eval_primary_split": final_primary_split,
+        "final_eval_split_results": final_split_results,
         "total_active_rank_mean": rank_mean,
         "total_active_rank_final": int(final_active_total_rank),
+        "target_rank_budget": int(target_rank_budget),
+        "effective_rank_budget": int(effective_rank_budget),
         "trainable_params_final": int(trainable_params),
         "total_params": int(total_params),
         "trainable_param_ratio": float(trainable_ratio),
@@ -614,13 +804,28 @@ def main():
         json.dump(results, f, ensure_ascii=False, indent=2)
 
     if use_wandb:
+        final_log_payload = {
+            "final/primary_metric": float(final_eval_accuracy),
+            "final/best_primary_metric": float(best_eval_accuracy),
+            "final/active_total_rank": int(final_active_total_rank),
+        }
+        if task_name == "mnli":
+            for split_name, split_row in final_split_results.items():
+                final_log_payload[f"final/{split_name}_loss"] = float(split_row["loss"])
+                for perf_name, perf_val in split_row.get("perf", {}).items():
+                    final_log_payload[f"final/{split_name}_{perf_name}"] = float(perf_val)
+                for metric_name, metric_value in split_row["scores"].items():
+                    final_log_payload[f"final/{split_name}_{metric_name}"] = float(metric_value)
+        else:
+            final_log_payload["final/loss"] = float(final_eval_loss)
+            first_split = sorted(final_split_results.keys())[0] if final_split_results else "validation"
+            split_row = final_split_results.get(first_split, {"scores": {}, "perf": {}})
+            for perf_name, perf_val in split_row.get("perf", {}).items():
+                final_log_payload[f"final/{perf_name}"] = float(perf_val)
+            for metric_name, metric_value in split_row.get("scores", {}).items():
+                final_log_payload[f"final/{metric_name}"] = float(metric_value)
         wandb.log(
-            {
-                "final/loss": float(final_eval_loss),
-                "final/accuracy": float(final_eval_accuracy),
-                "final/best_accuracy": float(best_eval_accuracy),
-                "final/active_total_rank": int(final_active_total_rank),
-            },
+            final_log_payload,
             step=global_step,
         )
         wandb.finish()
