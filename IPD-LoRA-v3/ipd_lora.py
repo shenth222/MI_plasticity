@@ -41,6 +41,20 @@ def _quantile_threshold(values: Sequence[float], q: float) -> float:
     return float(np.quantile(arr, qv))
 
 
+def _high_mask_by_quantile(values: Sequence[float], q: float) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    n = int(arr.size)
+    if n == 0:
+        return np.asarray([], dtype=bool)
+    qv = float(min(1.0, max(0.0, q)))
+    n_high = int(math.ceil((1.0 - qv) * n))
+    n_high = int(max(1, min(n, n_high)))
+    order = np.argsort(-arr, kind="mergesort")
+    mask = np.zeros(n, dtype=bool)
+    mask[order[:n_high]] = True
+    return mask
+
+
 def _round_to_choice(value: int, choices: Sequence[int]) -> int:
     choices = sorted(set(int(c) for c in choices))
     valid = [c for c in choices if c <= value]
@@ -343,6 +357,7 @@ def compute_plasticity_scores(
     lora_module_dict: Dict[str, IPDLoRALinear],
     optimizer: torch.optim.Optimizer,
     beta_P: float = 0.9,
+    task_weight: float = 0.1,
     eps: float = 1e-8,
 ) -> Dict[str, float]:
     """
@@ -367,7 +382,7 @@ def compute_plasticity_scores(
     # Default proxy weights. They are intentionally conservative and can be tuned.
     w_loss = 1.0
     w_logit = 0.1
-    w_task = 0.5
+    w_task = float(max(0.0, task_weight))
     w_repr = 0.1
     w_optim = 1.0
     w_update = 1.0
@@ -460,8 +475,8 @@ def update_quadrants_and_budget(
     ema_P = [_safe_float(m.ema_P) for m in modules]
     I_z = _zscore(ema_I)
     P_z = _zscore(ema_P)
-    i_thresh = _quantile_threshold(ema_I, high_i_quantile)
-    p_thresh = _quantile_threshold(ema_P, high_p_quantile)
+    high_i_mask = _high_mask_by_quantile(ema_I, high_i_quantile)
+    high_p_mask = _high_mask_by_quantile(ema_P, high_p_quantile)
 
     sorted_I = sorted(modules, key=lambda x: x.ema_I, reverse=True)
     sorted_P = sorted(modules, key=lambda x: x.ema_P, reverse=True)
@@ -498,8 +513,8 @@ def update_quadrants_and_budget(
             m.update_interval = NEVER_UPDATE_INTERVAL
             continue
 
-        high_I = m.ema_I >= i_thresh
-        high_P = m.ema_P >= p_thresh
+        high_I = bool(high_i_mask[idx])
+        high_P = bool(high_p_mask[idx])
         if high_I and high_P:
             q = "high_I_high_P"
         elif high_I and (not high_P):

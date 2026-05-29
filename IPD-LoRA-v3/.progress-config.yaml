@@ -1,0 +1,33 @@
+default_profile: advisor_detail_zh_doc
+
+profiles:
+  advisor_detail_zh_doc:
+    audience: advisor
+    advisor_preset: detail-oriented
+    format: markdown
+    layout: report
+    verbosity: detailed
+    language: zh
+
+tone: neutral
+vocabulary: []
+
+repos:
+  - name: main
+    path: .
+
+artifacts:
+  scan_dirs:
+    - ./outputs
+  include_ext:
+    - .png
+    - .jpg
+    - .pdf
+    - .ipynb
+    - .md
+    - .csv
+    - .tsv
+
+render:
+  enabled: true
+  target: markdown

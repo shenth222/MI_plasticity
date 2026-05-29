@@ -59,6 +59,7 @@
 - `--calibration_max_batches`：单次 I 评估使用的 calibration 最大 batch 数。
 - `--beta_I`：I 的 EMA 平滑系数。
 - `--beta_P`：P 的 EMA 平滑系数。
+- `--plasticity_task_weight`：P 计算中 `max(ema_I,0)` 任务改进代理项的权重（默认 `0.1`，用于降低 I->P 信息泄漏）。
 - `--high_i_quantile`：定义 high-I 的分位数阈值（默认 `0.5`）。
 - `--high_p_quantile`：定义 high-P 的分位数阈值（默认 `0.5`）。
 - `--low_i_low_p_update_interval`：low-I/low-P 象限的更新周期（默认 `32`，不再默认“几乎永久不更新”）。

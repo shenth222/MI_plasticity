@@ -105,6 +105,12 @@ def parse_args():
     parser.add_argument("--beta_I", type=float, default=0.9)
     parser.add_argument("--beta_P", type=float, default=0.9)
     parser.add_argument(
+        "--plasticity_task_weight",
+        type=float,
+        default=0.1,
+        help="Weight of task-improvement proxy (ema_I) when computing plasticity score P.",
+    )
+    parser.add_argument(
         "--high_i_quantile",
         type=float,
         default=0.5,
@@ -508,6 +514,57 @@ def active_rank_stats(lora_module_dict):
     return active_total_rank, active_module_count, frozen_module_count
 
 
+def snapshot_ipd_runtime_state(lora_module_dict) -> Dict[str, Dict]:
+    snapshot: Dict[str, Dict] = {}
+    for name, module in lora_module_dict.items():
+        snapshot[name] = {
+            "active_rank": int(module.active_rank),
+            "target_rank": int(module.target_rank),
+            "update_interval": int(module.update_interval),
+            "frozen_by_early_stop": bool(module.frozen_by_early_stop),
+            "quadrant": str(module.quadrant),
+            "current_I": float(module.current_I),
+            "current_P": float(module.current_P),
+            "ema_I": float(module.ema_I),
+            "ema_P": float(module.ema_P),
+            "I_z": float(module.I_z),
+            "P_z": float(module.P_z),
+            "I_rank": int(module.I_rank),
+            "P_rank": int(module.P_rank),
+            "low_P_counter": int(module.low_P_counter),
+            "prev_ema_I": float(module.prev_ema_I),
+            "freeze_step": int(module.freeze_step),
+            "freeze_cycles": int(module.freeze_cycles),
+        }
+    return snapshot
+
+
+def restore_ipd_runtime_state(lora_module_dict, snapshot: Dict[str, Dict]) -> None:
+    if not snapshot:
+        return
+    for name, module in lora_module_dict.items():
+        row = snapshot.get(name)
+        if row is None:
+            continue
+        module.active_rank = int(row.get("active_rank", module.active_rank))
+        module.target_rank = int(row.get("target_rank", module.target_rank))
+        module.update_interval = int(row.get("update_interval", module.update_interval))
+        module.frozen_by_early_stop = bool(row.get("frozen_by_early_stop", module.frozen_by_early_stop))
+        module.quadrant = str(row.get("quadrant", module.quadrant))
+        module.current_I = float(row.get("current_I", module.current_I))
+        module.current_P = float(row.get("current_P", module.current_P))
+        module.ema_I = float(row.get("ema_I", module.ema_I))
+        module.ema_P = float(row.get("ema_P", module.ema_P))
+        module.I_z = float(row.get("I_z", module.I_z))
+        module.P_z = float(row.get("P_z", module.P_z))
+        module.I_rank = int(row.get("I_rank", module.I_rank))
+        module.P_rank = int(row.get("P_rank", module.P_rank))
+        module.low_P_counter = int(row.get("low_P_counter", module.low_P_counter))
+        module.prev_ema_I = float(row.get("prev_ema_I", module.prev_ema_I))
+        module.freeze_step = int(row.get("freeze_step", module.freeze_step))
+        module.freeze_cycles = int(row.get("freeze_cycles", module.freeze_cycles))
+
+
 def maybe_save_checkpoint(args, model, tokenizer, global_step):
     if args.save_steps <= 0:
         return
@@ -613,6 +670,7 @@ def main():
     best_eval_accuracy = -1e9
     best_eval_loss = 1e9
     best_model_state = None
+    best_ipd_state = None
     final_eval_accuracy = 0.0
     final_eval_loss = 0.0
     last_eval_accuracy = None
@@ -728,6 +786,7 @@ def main():
                     lora_module_dict=lora_module_dict,
                     optimizer=optimizer,
                     beta_P=args.beta_P,
+                    task_weight=args.plasticity_task_weight,
                 )
 
                 # Sparse + grouped I scoring:
@@ -904,10 +963,13 @@ def main():
                     best_eval_accuracy = eval_accuracy
                     best_eval_loss = eval_loss
                     best_model_state = deepcopy(model.state_dict())
+                    best_ipd_state = deepcopy(snapshot_ipd_runtime_state(lora_module_dict))
                     best_dir = os.path.join(args.output_dir, "best_model")
                     ensure_dir(best_dir)
                     model.save_pretrained(best_dir)
                     tokenizer.save_pretrained(best_dir)
+                    with open(os.path.join(best_dir, "ipd_runtime_state.json"), "w", encoding="utf-8") as f:
+                        json.dump(best_ipd_state, f, ensure_ascii=False, indent=2)
                 maybe_save_checkpoint(args, model, tokenizer, global_step)
 
         if args.evaluation_strategy == "epoch":
@@ -958,13 +1020,18 @@ def main():
                 best_eval_accuracy = eval_accuracy
                 best_eval_loss = eval_loss
                 best_model_state = deepcopy(model.state_dict())
+                best_ipd_state = deepcopy(snapshot_ipd_runtime_state(lora_module_dict))
                 best_dir = os.path.join(args.output_dir, "best_model")
                 ensure_dir(best_dir)
                 model.save_pretrained(best_dir)
                 tokenizer.save_pretrained(best_dir)
+                with open(os.path.join(best_dir, "ipd_runtime_state.json"), "w", encoding="utf-8") as f:
+                    json.dump(best_ipd_state, f, ensure_ascii=False, indent=2)
 
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
+    if best_ipd_state is not None:
+        restore_ipd_runtime_state(lora_module_dict=lora_module_dict, snapshot=best_ipd_state)
 
     use_glue_metric = task_name in GLUE_TASK_TO_KEYS
     final_split_results = evaluate_all_splits(
@@ -981,6 +1048,8 @@ def main():
     ensure_dir(final_dir)
     model.save_pretrained(final_dir)
     tokenizer.save_pretrained(final_dir)
+    with open(os.path.join(final_dir, "ipd_runtime_state.json"), "w", encoding="utf-8") as f:
+        json.dump(snapshot_ipd_runtime_state(lora_module_dict), f, ensure_ascii=False, indent=2)
 
     total_params, trainable_params, trainable_ratio = count_parameters(model)
     (

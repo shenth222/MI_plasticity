@@ -255,6 +255,15 @@ def _attach_future_i_increase(module_scores: pd.DataFrame, future_score_points: 
     return out
 
 
+def _attach_counterfactual_module_gain(module_scores: pd.DataFrame) -> pd.DataFrame:
+    out = module_scores.copy()
+    if out.empty:
+        return out
+    out["module_gain"] = out["current_I"].astype(float)
+    out["module_gain_per_rank"] = out["module_gain"] / np.clip(out["active_rank"].astype(float), 1.0, None)
+    return out
+
+
 def plot_quadrant_actual_gain(module_scores: pd.DataFrame, training_log: pd.DataFrame, output_dir: str, future_eval_points: int):
     if module_scores.empty:
         return
@@ -263,6 +272,7 @@ def plot_quadrant_actual_gain(module_scores: pd.DataFrame, training_log: pd.Data
     if ms.empty:
         return
     ms = _attach_future_loss_decrease(ms, training_log, future_eval_points=future_eval_points)
+    ms = _attach_counterfactual_module_gain(ms)
 
     # Final retention ratio is computed on last scoring step.
     last_step = ms["step"].max()
@@ -282,8 +292,9 @@ def plot_quadrant_actual_gain(module_scores: pd.DataFrame, training_log: pd.Data
             avg_I=("ema_I", "mean"),
             avg_P=("ema_P", "mean"),
             avg_active_rank=("active_rank", "mean"),
-            avg_training_gain=("training_gain", "mean"),
-            avg_loss_decrease=("loss_decrease", "mean"),
+            avg_module_gain=("module_gain", "mean"),
+            avg_module_gain_per_rank=("module_gain_per_rank", "mean"),
+            avg_global_loss_decrease=("loss_decrease", "mean"),
         )
     )
     summary = (
@@ -292,8 +303,9 @@ def plot_quadrant_actual_gain(module_scores: pd.DataFrame, training_log: pd.Data
             avg_I=("avg_I", "mean"),
             avg_P=("avg_P", "mean"),
             avg_active_rank=("avg_active_rank", "mean"),
-            avg_training_gain=("avg_training_gain", "mean"),
-            avg_loss_decrease=("avg_loss_decrease", "mean"),
+            avg_module_gain=("avg_module_gain", "mean"),
+            avg_module_gain_per_rank=("avg_module_gain_per_rank", "mean"),
+            avg_global_loss_decrease=("avg_global_loss_decrease", "mean"),
             covered_steps=("step", "nunique"),
         )
         .merge(retention, on="quadrant", how="left")
@@ -303,16 +315,16 @@ def plot_quadrant_actual_gain(module_scores: pd.DataFrame, training_log: pd.Data
     summary = summary.sort_values("quadrant")
     summary.to_csv(os.path.join(output_dir, "quadrant_module_stats.csv"), index=False)
 
-    # Plot requested: actual training gain by quadrant (validation loss decrease in future steps).
+    # Use module-level counterfactual gain to avoid assigning one global future-loss label to all modules.
     plt.figure(figsize=(8, 5))
     x = np.arange(len(summary))
-    y = summary["avg_loss_decrease"].to_numpy(dtype=float)
+    y = summary["avg_module_gain"].to_numpy(dtype=float)
     colors = [QUADRANT_COLOR.get(q, "#333333") for q in summary["quadrant"].tolist()]
     plt.bar(x, y, color=colors, alpha=0.9)
     plt.xticks(x, summary["quadrant"], rotation=15)
     plt.xlabel("quadrant")
-    plt.ylabel(f"validation loss decrease (+{future_eval_points} eval)")
-    plt.title("Actual Training Gain by Quadrant")
+    plt.ylabel("counterfactual module gain (current_I)")
+    plt.title("Counterfactual Module Gain by Quadrant")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "quadrant_actual_training_gain.png"), dpi=180)
     plt.close()
@@ -322,8 +334,8 @@ def plot_quadrant_actual_gain(module_scores: pd.DataFrame, training_log: pd.Data
         ("avg_I", "avg I"),
         ("avg_P", "avg P"),
         ("avg_active_rank", "avg active rank"),
-        ("avg_training_gain", "avg training gain"),
-        ("avg_loss_decrease", "avg loss decrease"),
+        ("avg_module_gain", "avg module gain"),
+        ("avg_module_gain_per_rank", "avg module gain / rank"),
         ("final_retention_ratio", "final retention ratio"),
     ]
     fig, axes = plt.subplots(2, 3, figsize=(14, 8))
@@ -362,18 +374,19 @@ def plot_quadrant_gain_interpretation(
 
     ms = _attach_future_loss_decrease(ms, training_log, future_eval_points=future_eval_points)
     ms = _attach_future_i_increase(ms, future_score_points=future_score_points)
+    ms = _attach_counterfactual_module_gain(ms)
 
     # Keep rows with valid future targets for each analysis.
-    ms_loss = ms.dropna(subset=["loss_decrease"]).copy()
+    ms_loss = ms.dropna(subset=["module_gain"]).copy()
     ms_i = ms.dropna(subset=["delta_ema_I"]).copy()
 
-    # Plot A: gain stability (boxplot of future validation loss decrease by quadrant).
+    # Plot A: gain stability (boxplot of module counterfactual gain by quadrant).
     if not ms_loss.empty:
         data = []
         labels = []
         colors = []
         for q in quadrant_order:
-            qvals = ms_loss.loc[ms_loss["quadrant"] == q, "loss_decrease"].to_numpy(dtype=float)
+            qvals = ms_loss.loc[ms_loss["quadrant"] == q, "module_gain"].to_numpy(dtype=float)
             if len(qvals) == 0:
                 continue
             data.append(qvals)
@@ -386,8 +399,8 @@ def plot_quadrant_gain_interpretation(
                 patch.set_facecolor(c)
                 patch.set_alpha(0.55)
             plt.xlabel("quadrant")
-            plt.ylabel(f"validation loss decrease (+{future_eval_points} eval)")
-            plt.title("Quadrant Gain Stability (Distribution)")
+            plt.ylabel("counterfactual module gain (current_I)")
+            plt.title("Quadrant Counterfactual Gain Stability")
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, "quadrant_gain_stability.png"), dpi=180)
             plt.close()
@@ -452,13 +465,13 @@ def plot_quadrant_gain_interpretation(
             for _, row in summary.iterrows():
                 q = row["quadrant"]
                 x = float(row["avg_I"])
-                y = float(row["avg_loss_decrease"])
+                y = float(row["avg_module_gain"])
                 size = 400.0 * float(row["final_retention_ratio"] + 0.2)
                 plt.scatter(x, y, s=size, color=QUADRANT_COLOR.get(q, "#333333"), alpha=0.8)
                 plt.text(x, y, q, fontsize=9)
             plt.xlabel("avg I (importance)")
-            plt.ylabel(f"avg validation loss decrease (+{future_eval_points} eval)")
-            plt.title("Keep vs Prune Map (Importance / Gain / Retention)")
+            plt.ylabel("avg counterfactual module gain")
+            plt.title("Keep vs Prune Map (Importance / Counterfactual Gain / Retention)")
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, "quadrant_keep_prune_map.png"), dpi=180)
             plt.close()

@@ -50,10 +50,11 @@ python train_ipd_lora.py \
     --calibration_size 192 \
     --calibration_resample_stride 9973 \
     --total_rank_budget 0 \
-    --target_rank 8 \
+    --target_rank 6 \
     --avoid_zero_rank \
     --beta_I 0.9 \
     --beta_P 0.9 \
+    --plasticity_task_weight 0.1 \
     --high_i_quantile 0.5 \
     --high_p_quantile 0.5 \
     --low_i_low_p_update_interval 32 \
