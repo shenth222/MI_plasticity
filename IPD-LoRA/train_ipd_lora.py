@@ -9,7 +9,8 @@ from typing import Dict, List
 import numpy as np
 import torch
 from datasets import load_dataset, load_from_disk
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, spearmanr
+from sklearn.metrics import f1_score, matthews_corrcoef, mean_squared_error
 from torch.utils.data import DataLoader
 from transformers import (
     AutoModelForSequenceClassification,
@@ -24,6 +25,7 @@ from ipd_lora import (
     collect_module_rows,
     compute_importance_scores,
     compute_plasticity_scores,
+    count_effective_trainable_parameters,
     count_parameters,
     inject_ipd_lora,
     update_quadrants_and_budget,
@@ -98,6 +100,7 @@ def parse_args():
     parser.add_argument("--tfinal_steps", type=int, default=0)
     parser.add_argument("--tfinal_ratio", type=float, default=0.1)
     parser.add_argument("--logging_steps", type=int, default=20)
+    parser.add_argument("--evaluation_strategy", type=str, default="epoch", choices=["no", "steps", "epoch"])
     parser.add_argument("--eval_steps", type=int, default=100)
     parser.add_argument("--save_steps", type=int, default=0)
     parser.add_argument("--calibration_max_batches", type=int, default=16)
@@ -172,8 +175,25 @@ def load_raw_datasets(args):
     task = args.task_name.lower()
 
     if args.dataset_path:
-        raw = load_from_disk(args.dataset_path)
-        return raw
+        load_errors = []
+        try:
+            # 对齐 LoRA/AdaLoRA：本地 GLUE 根目录优先使用 load_dataset(path, task)
+            return load_dataset(args.dataset_path, task)
+        except Exception as e:
+            load_errors.append(f"load_dataset(path, task) failed: {repr(e)}")
+            if task == "stsb":
+                try:
+                    return load_dataset(args.dataset_path, "sts_b")
+                except Exception as e2:
+                    load_errors.append(f"load_dataset(path, sts_b) failed: {repr(e2)}")
+        try:
+            # 兼容 load_from_disk 导出的 DatasetDict
+            return load_from_disk(args.dataset_path)
+        except Exception as e:
+            load_errors.append(f"load_from_disk failed: {repr(e)}")
+            raise RuntimeError(
+                f"Failed to load dataset from dataset_path={args.dataset_path}\n" + "\n".join(load_errors)
+            )
 
     if args.train_file or args.validation_file:
         if not args.train_file or not args.validation_file:
@@ -193,6 +213,26 @@ def load_raw_datasets(args):
     if dataset_name == "glue":
         config = dataset_config if dataset_config is not None else task
         return load_dataset("glue", config)
+    if dataset_config is None and os.path.exists(dataset_name):
+        # 兼容把本地路径错误地传给 dataset_name 的场景
+        load_errors = []
+        try:
+            return load_dataset(dataset_name, task)
+        except Exception as e:
+            load_errors.append(f"load_dataset(dataset_name_path, task) failed: {repr(e)}")
+            if task == "stsb":
+                try:
+                    return load_dataset(dataset_name, "sts_b")
+                except Exception as e2:
+                    load_errors.append(f"load_dataset(dataset_name_path, sts_b) failed: {repr(e2)}")
+        try:
+            return load_from_disk(dataset_name)
+        except Exception as e:
+            load_errors.append(f"load_from_disk(dataset_name_path) failed: {repr(e)}")
+            raise RuntimeError(
+                f"Failed to load local dataset from dataset_name path={dataset_name}\n"
+                + "\n".join(load_errors)
+            )
     if dataset_config is not None:
         return load_dataset(dataset_name, dataset_config)
     return load_dataset(dataset_name)
@@ -213,20 +253,21 @@ def prepare_datasets(args, tokenizer):
     task = args.task_name.lower()
     raw = load_raw_datasets(args)
     train_split = "train" if "train" in raw else args.local_train_split
-    use_builtin_glue = args.dataset_name == "glue" and args.dataset_path is None and args.train_file is None
-    eval_split = get_eval_split(task) if use_builtin_glue else args.local_eval_split
     if train_split not in raw:
         raise ValueError(f"Train split '{train_split}' not found in dataset.")
-    if task == "mnli" and use_builtin_glue:
-        required = ["validation_matched", "validation_mismatched"]
-        for s in required:
-            if s not in raw:
-                raise ValueError(f"Eval split '{s}' not found in dataset.")
+
+    has_mnli_dual_eval = (
+        task == "mnli" and "validation_matched" in raw and "validation_mismatched" in raw
+    )
+    if has_mnli_dual_eval:
         eval_raw_dict = {
             "matched": raw["validation_matched"],
             "mismatched": raw["validation_mismatched"],
         }
     else:
+        eval_split = args.local_eval_split
+        if eval_split not in raw and "validation" in raw:
+            eval_split = "validation"
         if eval_split not in raw:
             raise ValueError(f"Eval split '{eval_split}' not found in dataset.")
         eval_raw_dict = {"validation": raw[eval_split]}
@@ -311,11 +352,26 @@ def evaluate_model(model, dataloader, device, task_name: str, use_glue_metric: b
         scores = metric.compute()
     else:
         if task_name == "stsb":
-            corr = pearsonr(preds_np, refs_np)[0] if len(preds_np) > 1 else 0.0
-            scores = {"pearson": float(corr)}
+            pearson_val = pearsonr(preds_np, refs_np)[0] if len(preds_np) > 1 else 0.0
+            spearman_val = spearmanr(preds_np, refs_np).correlation if len(preds_np) > 1 else 0.0
+            pearson_val = float(0.0 if np.isnan(pearson_val) else pearson_val)
+            spearman_val = float(0.0 if np.isnan(spearman_val) else spearman_val)
+            rmse = mean_squared_error(refs_np, preds_np, squared=False) if len(preds_np) > 0 else 0.0
+            scores = {
+                "pearson": pearson_val,
+                "spearmanr": spearman_val,
+                "rmse": float(rmse),
+                "combined_score": float((pearson_val + spearman_val) / 2.0),
+            }
         else:
             acc_fallback = float((preds_np == refs_np).mean()) if len(preds_np) > 0 else 0.0
             scores = {"accuracy": acc_fallback}
+            if task_name == "cola" and len(preds_np) > 0:
+                scores["matthews_correlation"] = float(matthews_corrcoef(refs_np, preds_np))
+                scores["combined_score"] = float((scores["accuracy"] + scores["matthews_correlation"]) / 2.0)
+            elif task_name in {"mrpc", "qqp"} and len(preds_np) > 0:
+                scores["f1"] = float(f1_score(refs_np, preds_np))
+                scores["combined_score"] = float((scores["accuracy"] + scores["f1"]) / 2.0)
     avg_loss = total_loss / max(total_n, 1)
     if "accuracy" in scores:
         acc = float(scores["accuracy"])
@@ -377,14 +433,9 @@ def evaluate_all_splits(model, eval_loaders, device, task_name: str, use_glue_me
 def build_eval_wandb_payload(
     split_results: Dict[str, Dict],
     task_name: str,
-    best_eval_accuracy: float,
-    eval_accuracy: float,
     eval_loss: float,
 ) -> Dict[str, float]:
-    payload: Dict[str, float] = {
-        "eval/primary_metric": float(eval_accuracy),
-        "eval/best_primary_metric": float(max(best_eval_accuracy, eval_accuracy)),
-    }
+    payload: Dict[str, float] = {}
 
     # 与 LoRA/AdaLoRA 对齐：
     # - 非 MNLI: eval/accuracy, eval/f1, eval/loss, eval/runtime...
@@ -460,6 +511,9 @@ def main():
             config=vars(args),
         )
 
+    if args.evaluation_strategy == "steps" and args.eval_steps <= 0:
+        raise ValueError("evaluation_strategy=steps requires eval_steps > 0.")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
     train_ds, eval_ds_dict, raw, train_split = prepare_datasets(args, tokenizer)
@@ -529,6 +583,7 @@ def main():
     running_steps = 0
     global_step = 0
     rank_total_history: List[int] = []
+    active_total_rank, active_module_count, frozen_module_count = active_rank_stats(lora_module_dict)
 
     # Warmup phase for IPD policy: all modules update every step, no dynamic reallocation.
     for module in lora_module_dict.values():
@@ -554,10 +609,13 @@ def main():
     rank_adapt_end_step = max(0, num_training_steps - tfinal_steps)
     score_event_idx = 0
 
+    num_batches_per_epoch = max(1, len(train_loader))
+
     for epoch in range(args.num_train_epochs):
         model.train()
-        for batch in train_loader:
+        for step_in_epoch, batch in enumerate(train_loader, start=1):
             global_step += 1
+            epoch_float = float(epoch + step_in_epoch / num_batches_per_epoch)
             batch = {k: v.to(device) for k, v in batch.items()}
 
             optimizer.zero_grad(set_to_none=True)
@@ -678,7 +736,7 @@ def main():
                     training_log_path,
                     {
                         "step": int(global_step),
-                        "epoch": int(epoch),
+                        "epoch": float(epoch_float),
                         "train_loss": float(avg_train_loss),
                         "eval_loss": None if last_eval_loss is None else float(last_eval_loss),
                         "eval_accuracy": None if last_eval_accuracy is None else float(last_eval_accuracy),
@@ -689,7 +747,7 @@ def main():
                     },
                 )
                 print(
-                    f"[train] step={global_step} epoch={epoch} loss={avg_train_loss:.4f} "
+                    f"[train] step={global_step} epoch={epoch_float:.2f} loss={avg_train_loss:.4f} "
                     f"lr={lr:.3e} active_rank={active_total_rank} frozen={frozen_module_count}"
                 )
                 if use_wandb:
@@ -700,17 +758,21 @@ def main():
                             "train/active_total_rank": int(active_total_rank),
                             "train/active_module_count": int(active_module_count),
                             "train/frozen_module_count": int(frozen_module_count),
-                            "epoch": int(epoch),
+                            "train/epoch": float(epoch_float),
+                            "epoch": float(epoch_float),
                         },
                         step=global_step,
                     )
                 running_loss = 0.0
                 running_steps = 0
 
-            if args.eval_steps > 0 and global_step % args.eval_steps == 0:
-                use_glue_metric = (
-                    args.dataset_name == "glue" and args.dataset_path is None and args.train_file is None
-                )
+            should_eval_on_steps = (
+                args.evaluation_strategy == "steps"
+                and args.eval_steps > 0
+                and global_step % args.eval_steps == 0
+            )
+            if should_eval_on_steps:
+                use_glue_metric = task_name in GLUE_TASK_TO_KEYS
                 split_results = evaluate_all_splits(
                     model=model,
                     eval_loaders=eval_loaders,
@@ -724,7 +786,7 @@ def main():
                     training_log_path,
                     {
                         "step": int(global_step),
-                        "epoch": int(epoch),
+                        "epoch": float(epoch_float),
                         "train_loss": None,
                         "eval_loss": float(eval_loss),
                         "eval_accuracy": float(eval_accuracy),
@@ -737,17 +799,16 @@ def main():
                     },
                 )
                 print(
-                    f"[eval] step={global_step} primary_split={primary_split} "
+                    f"[eval] step={global_step} epoch={epoch_float:.2f} primary_split={primary_split} "
                     f"eval_loss={eval_loss:.4f} eval_metric={eval_accuracy:.4f}"
                 )
                 if use_wandb:
                     eval_log_payload = build_eval_wandb_payload(
                         split_results=split_results,
                         task_name=task_name,
-                        best_eval_accuracy=best_eval_accuracy,
-                        eval_accuracy=eval_accuracy,
                         eval_loss=eval_loss,
                     )
+                    eval_log_payload["epoch"] = float(epoch_float)
                     wandb.log(
                         eval_log_payload,
                         step=global_step,
@@ -761,7 +822,59 @@ def main():
                     tokenizer.save_pretrained(best_dir)
                 maybe_save_checkpoint(args, model, tokenizer, global_step)
 
-    use_glue_metric = args.dataset_name == "glue" and args.dataset_path is None and args.train_file is None
+        if args.evaluation_strategy == "epoch":
+            eval_epoch_float = float(epoch + 1.0)
+            active_total_rank, active_module_count, frozen_module_count = active_rank_stats(lora_module_dict)
+            use_glue_metric = task_name in GLUE_TASK_TO_KEYS
+            split_results = evaluate_all_splits(
+                model=model,
+                eval_loaders=eval_loaders,
+                device=device,
+                task_name=task_name,
+                use_glue_metric=use_glue_metric,
+            )
+            primary_split, eval_accuracy, eval_loss = choose_primary_eval(split_results, task_name=task_name)
+            last_eval_loss, last_eval_accuracy = eval_loss, eval_accuracy
+            write_jsonl(
+                training_log_path,
+                {
+                    "step": int(global_step),
+                    "epoch": float(eval_epoch_float),
+                    "train_loss": None,
+                    "eval_loss": float(eval_loss),
+                    "eval_accuracy": float(eval_accuracy),
+                    "learning_rate": float(scheduler.get_last_lr()[0]),
+                    "active_total_rank": int(active_total_rank),
+                    "active_module_count": int(active_module_count),
+                    "frozen_module_count": int(frozen_module_count),
+                    "eval_primary_split": primary_split,
+                    "eval_split_results": split_results,
+                },
+            )
+            print(
+                f"[eval] step={global_step} epoch={eval_epoch_float:.2f} primary_split={primary_split} "
+                f"eval_loss={eval_loss:.4f} eval_metric={eval_accuracy:.4f}"
+            )
+            if use_wandb:
+                eval_log_payload = build_eval_wandb_payload(
+                    split_results=split_results,
+                    task_name=task_name,
+                    eval_loss=eval_loss,
+                )
+                eval_log_payload["epoch"] = float(eval_epoch_float)
+                wandb.log(
+                    eval_log_payload,
+                    step=global_step,
+                )
+            if eval_accuracy > best_eval_accuracy:
+                best_eval_accuracy = eval_accuracy
+                best_eval_loss = eval_loss
+                best_dir = os.path.join(args.output_dir, "best_model")
+                ensure_dir(best_dir)
+                model.save_pretrained(best_dir)
+                tokenizer.save_pretrained(best_dir)
+
+    use_glue_metric = task_name in GLUE_TASK_TO_KEYS
     final_split_results = evaluate_all_splits(
         model=model,
         eval_loaders=eval_loaders,
@@ -778,6 +891,14 @@ def main():
     tokenizer.save_pretrained(final_dir)
 
     total_params, trainable_params, trainable_ratio = count_parameters(model)
+    (
+        effective_trainable_params,
+        effective_lora_params,
+        non_lora_trainable_params,
+    ) = count_effective_trainable_parameters(
+        model=model,
+        lora_module_dict=lora_module_dict,
+    )
     final_active_total_rank, _, _ = active_rank_stats(lora_module_dict)
     rank_mean = float(np.mean(rank_total_history)) if len(rank_total_history) > 0 else 0.0
 
@@ -797,6 +918,9 @@ def main():
         "target_rank_budget": int(target_rank_budget),
         "effective_rank_budget": int(effective_rank_budget),
         "trainable_params_final": int(trainable_params),
+        "effective_trainable_params_final": int(effective_trainable_params),
+        "effective_lora_params_final": int(effective_lora_params),
+        "non_lora_trainable_params_final": int(non_lora_trainable_params),
         "total_params": int(total_params),
         "trainable_param_ratio": float(trainable_ratio),
     }
@@ -805,8 +929,6 @@ def main():
 
     if use_wandb:
         final_log_payload = {
-            "final/primary_metric": float(final_eval_accuracy),
-            "final/best_primary_metric": float(best_eval_accuracy),
             "final/active_total_rank": int(final_active_total_rank),
         }
         if task_name == "mnli":

@@ -590,3 +590,32 @@ def count_parameters(model: nn.Module) -> Tuple[int, int, float]:
             trainable += n
     ratio = (trainable / total) if total > 0 else 0.0
     return total, trainable, ratio
+
+
+def count_effective_trainable_parameters(
+    model: nn.Module,
+    lora_module_dict: Dict[str, IPDLoRALinear],
+) -> Tuple[int, int, int]:
+    """
+    Count effective trainable parameters under dynamic-rank LoRA.
+
+    Returns:
+    - effective_total: effective non-LoRA trainable + effective LoRA trainable
+    - effective_lora: sum(active_rank * (in_features + out_features)) over modules
+    - non_lora_trainable: trainable params excluding LoRA A/B tensors
+    """
+    non_lora_trainable = 0
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if name.endswith("lora_A") or name.endswith("lora_B"):
+            continue
+        non_lora_trainable += int(p.numel())
+
+    effective_lora = 0
+    for module in lora_module_dict.values():
+        r = int(max(0, min(int(module.active_rank), int(module.max_rank))))
+        effective_lora += int(r * (int(module.in_features) + int(module.out_features)))
+
+    effective_total = int(non_lora_trainable + effective_lora)
+    return effective_total, int(effective_lora), int(non_lora_trainable)

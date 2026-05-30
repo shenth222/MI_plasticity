@@ -32,7 +32,8 @@
 - `--warmup_ratio`：学习率 warmup 比例。
 - `--seed`：随机种子。
 - `--logging_steps`：训练日志步长。
-- `--eval_steps`：评估步长。
+- `--evaluation_strategy`：评估策略，`no|steps|epoch`（默认 `epoch`，与 AdaLoRA 对齐）。
+- `--eval_steps`：仅在 `evaluation_strategy=steps` 时生效的评估步长。
 - `--save_steps`：checkpoint 保存步长（`<=0` 禁用）。
 
 ## 4. LoRA 结构参数
@@ -89,7 +90,7 @@
 ## 10. 评估与日志行为
 
 - GLUE 任务：会上报评估器返回的全部指标，不只 accuracy。
-- MNLI：会同时上报 `matched` 与 `mismatched` 两个 split 的所有指标到 W&B。
+- MNLI：只要数据中存在 `validation_matched`/`validation_mismatched`，就会同时上报两者所有指标到 W&B。
 - best model 选择：
   - MNLI：以 `matched` split 的主指标为准。
   - 其他任务：以默认验证 split 主指标为准。
