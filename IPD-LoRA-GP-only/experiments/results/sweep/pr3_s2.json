@@ -1,0 +1,414 @@
+{
+  "summary": {
+    "config": {
+      "n_layers": 8,
+      "dim": 128,
+      "planted_rank": 3,
+      "n_planted": 2,
+      "max_rank": 8,
+      "budget": 16,
+      "alpha": 8,
+      "n_train": 4096,
+      "n_eval": 1024,
+      "bs": 128,
+      "steps": 800,
+      "lr": 0.01,
+      "eval_every": 100,
+      "gp_interval": 50,
+      "gp_eval_batches": 2,
+      "gora_batches": 8,
+      "planted_scale": 1.0,
+      "seed": 2,
+      "methods": [
+        "uniform",
+        "gora",
+        "goodput",
+        "oracle"
+      ],
+      "out": "experiments/results/sweep/pr3_s2.json"
+    },
+    "planted_names": [
+      "blocks.0.proj",
+      "blocks.1.proj"
+    ],
+    "final_mse": {
+      "uniform": 0.027986935805529356,
+      "gora": 3.775847384757114e-09,
+      "goodput": 1.616529088366292e-08,
+      "oracle": 2.084685356740397e-12
+    },
+    "budget_on_planted": {
+      "uniform": 0.25,
+      "gora": 1.0,
+      "goodput": 0.875,
+      "oracle": 1.0
+    },
+    "mse_ratio_to_uniform": {
+      "uniform": 1.0,
+      "gora": 1.349146405663718e-07,
+      "goodput": 5.776013135553467e-07,
+      "oracle": 7.448780285294853e-11
+    },
+    "goodput_predictability": {
+      "persistence": 0.9999991031055094,
+      "planted_topk_recall": 1.0
+    }
+  },
+  "results": {
+    "uniform": {
+      "method": "uniform",
+      "final_mse": 0.027986935805529356,
+      "alloc": {
+        "blocks.0.proj": 2,
+        "blocks.1.proj": 2,
+        "blocks.2.proj": 2,
+        "blocks.3.proj": 2,
+        "blocks.4.proj": 2,
+        "blocks.5.proj": 2,
+        "blocks.6.proj": 2,
+        "blocks.7.proj": 2
+      },
+      "budget_on_planted": 0.25,
+      "curve": [
+        [
+          100,
+          0.02829349972307682
+        ],
+        [
+          200,
+          0.027681659208610654
+        ],
+        [
+          300,
+          0.02774381125345826
+        ],
+        [
+          400,
+          0.02791533339768648
+        ],
+        [
+          500,
+          0.027820908930152655
+        ],
+        [
+          600,
+          0.027779091615229845
+        ],
+        [
+          700,
+          0.027914163889363408
+        ],
+        [
+          800,
+          0.027986935572698712
+        ]
+      ],
+      "goodput_log": []
+    },
+    "gora": {
+      "method": "gora",
+      "final_mse": 3.775847384757114e-09,
+      "alloc": {
+        "blocks.0.proj": 8,
+        "blocks.1.proj": 8,
+        "blocks.2.proj": 0,
+        "blocks.3.proj": 0,
+        "blocks.4.proj": 0,
+        "blocks.5.proj": 0,
+        "blocks.6.proj": 0,
+        "blocks.7.proj": 0
+      },
+      "budget_on_planted": 1.0,
+      "curve": [
+        [
+          100,
+          3.661366918095155e-05
+        ],
+        [
+          200,
+          2.566255119518246e-06
+        ],
+        [
+          300,
+          5.799226983072003e-07
+        ],
+        [
+          400,
+          1.7780115157961518e-07
+        ],
+        [
+          500,
+          6.599389834605063e-08
+        ],
+        [
+          600,
+          2.546378397028093e-08
+        ],
+        [
+          700,
+          2.7218763687386627e-08
+        ],
+        [
+          800,
+          3.775847357001538e-09
+        ]
+      ],
+      "goodput_log": []
+    },
+    "goodput": {
+      "method": "goodput",
+      "final_mse": 1.616529088366292e-08,
+      "alloc": {
+        "blocks.0.proj": 8,
+        "blocks.1.proj": 6,
+        "blocks.2.proj": 0,
+        "blocks.3.proj": 0,
+        "blocks.4.proj": 0,
+        "blocks.5.proj": 1,
+        "blocks.6.proj": 0,
+        "blocks.7.proj": 1
+      },
+      "budget_on_planted": 0.875,
+      "curve": [
+        [
+          100,
+          0.0006207169062690809
+        ],
+        [
+          200,
+          4.883079952833214e-06
+        ],
+        [
+          300,
+          1.0100056044848316e-06
+        ],
+        [
+          400,
+          2.94621308682963e-07
+        ],
+        [
+          500,
+          1.0736028865920844e-07
+        ],
+        [
+          600,
+          4.853695489970278e-08
+        ],
+        [
+          700,
+          2.37314039530645e-08
+        ],
+        [
+          800,
+          1.6165290550596012e-08
+        ]
+      ],
+      "goodput_log": [
+        {
+          "blocks.0.proj": 2.7660280466079705e-08,
+          "blocks.1.proj": 1.6065314412117e-08,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 4.6566128730773915e-11,
+          "blocks.4.proj": 4.6566128730773915e-11,
+          "blocks.5.proj": 9.313225746154783e-11,
+          "blocks.6.proj": 4.6566128730773915e-11,
+          "blocks.7.proj": 9.313225746154783e-11
+        },
+        {
+          "blocks.0.proj": 2.557710104156285e-08,
+          "blocks.1.proj": 1.500642004733284e-08,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 4.1909515857696525e-11,
+          "blocks.4.proj": 4.1909515857696525e-11,
+          "blocks.5.proj": 8.381903171539305e-11,
+          "blocks.6.proj": 4.1909515857696525e-11,
+          "blocks.7.proj": 8.381903171539305e-11
+        },
+        {
+          "blocks.0.proj": 2.302937264175852e-08,
+          "blocks.1.proj": 1.3514630457696812e-08,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 3.7718564271926875e-11,
+          "blocks.4.proj": 3.7718564271926875e-11,
+          "blocks.5.proj": 7.552807801403104e-11,
+          "blocks.6.proj": 3.7718564271926875e-11,
+          "blocks.7.proj": 7.552807801403104e-11
+        },
+        {
+          "blocks.0.proj": 2.072704360216448e-08,
+          "blocks.1.proj": 1.2163466787266465e-08,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 3.394670784473419e-11,
+          "blocks.4.proj": 3.394670784473419e-11,
+          "blocks.5.proj": 6.797527021262793e-11,
+          "blocks.6.proj": 3.394670784473419e-11,
+          "blocks.7.proj": 6.797527021262793e-11
+        },
+        {
+          "blocks.0.proj": 1.8654613511444035e-08,
+          "blocks.1.proj": 1.0947173162397422e-08,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 3.0552037060260773e-11,
+          "blocks.4.proj": 3.0552037060260773e-11,
+          "blocks.5.proj": 6.117774319136514e-11,
+          "blocks.6.proj": 3.0552037060260773e-11,
+          "blocks.7.proj": 6.117774319136514e-11
+        },
+        {
+          "blocks.0.proj": 1.6789242754498443e-08,
+          "blocks.1.proj": 9.852490899599311e-09,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 2.7496833354234697e-11,
+          "blocks.4.proj": 2.7496833354234697e-11,
+          "blocks.5.proj": 5.506281104317167e-11,
+          "blocks.6.proj": 2.7496833354234697e-11,
+          "blocks.7.proj": 5.5065653214114714e-11
+        },
+        {
+          "blocks.0.proj": 1.5110372125025147e-08,
+          "blocks.1.proj": 8.86725365201831e-09,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 2.474715001881123e-11,
+          "blocks.4.proj": 2.474715001881123e-11,
+          "blocks.5.proj": 4.955510885338299e-11,
+          "blocks.6.proj": 2.474715001881123e-11,
+          "blocks.7.proj": 4.956193006364628e-11
+        },
+        {
+          "blocks.0.proj": 1.3599356051169023e-08,
+          "blocks.1.proj": 7.980534208005945e-09,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 2.2272435016930107e-11,
+          "blocks.4.proj": 2.2272435016930107e-11,
+          "blocks.5.proj": 4.459675579710165e-11,
+          "blocks.6.proj": 2.2272435016930107e-11,
+          "blocks.7.proj": 4.460573705728165e-11
+        },
+        {
+          "blocks.0.proj": 1.2239436077992307e-08,
+          "blocks.1.proj": 7.1824820898670326e-09,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 2.0045191515237098e-11,
+          "blocks.4.proj": 2.0045191515237098e-11,
+          "blocks.5.proj": 4.013636967465573e-11,
+          "blocks.6.proj": 2.0045191515237098e-11,
+          "blocks.7.proj": 4.014374226608197e-11
+        },
+        {
+          "blocks.0.proj": 1.1015501351977274e-08,
+          "blocks.1.proj": 6.464234828270643e-09,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 1.804067236371339e-11,
+          "blocks.4.proj": 1.804067236371339e-11,
+          "blocks.5.proj": 3.6122377435822274e-11,
+          "blocks.6.proj": 1.804067236371339e-11,
+          "blocks.7.proj": 3.6129368039473775e-11
+        },
+        {
+          "blocks.0.proj": 9.913955613262724e-09,
+          "blocks.1.proj": 5.817811641503052e-09,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 1.623660512734205e-11,
+          "blocks.4.proj": 1.623660512734205e-11,
+          "blocks.5.proj": 3.251049496360793e-11,
+          "blocks.6.proj": 1.623660512734205e-11,
+          "blocks.7.proj": 3.251678650689428e-11
+        },
+        {
+          "blocks.0.proj": 8.922568689471584e-09,
+          "blocks.1.proj": 5.236030536564641e-09,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 1.4612944614607847e-11,
+          "blocks.4.proj": 1.4612944614607847e-11,
+          "blocks.5.proj": 2.925944546724714e-11,
+          "blocks.6.proj": 1.4612944614607847e-11,
+          "blocks.7.proj": 2.926528549188879e-11
+        },
+        {
+          "blocks.0.proj": 8.030313086178674e-09,
+          "blocks.1.proj": 4.712427527317098e-09,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 1.3151650153147062e-11,
+          "blocks.4.proj": 1.3151650153147062e-11,
+          "blocks.5.proj": 2.6333500920522428e-11,
+          "blocks.6.proj": 1.3151650153147062e-11,
+          "blocks.7.proj": 2.6338756942699912e-11
+        },
+        {
+          "blocks.0.proj": 7.2272835761221075e-09,
+          "blocks.1.proj": 4.2411847745853884e-09,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 1.1836485137832357e-11,
+          "blocks.4.proj": 1.1836485137832357e-11,
+          "blocks.5.proj": 2.3700062010628217e-11,
+          "blocks.6.proj": 1.1836485137832357e-11,
+          "blocks.7.proj": 2.370470361274598e-11
+        },
+        {
+          "blocks.0.proj": 6.504556578533102e-09,
+          "blocks.1.proj": 3.817066297126849e-09,
+          "blocks.2.proj": 0.0,
+          "blocks.3.proj": 1.0652836624049122e-11,
+          "blocks.4.proj": 1.0652836624049122e-11,
+          "blocks.5.proj": 2.133010021848638e-11,
+          "blocks.6.proj": 1.0652836624049122e-11,
+          "blocks.7.proj": 2.13341888425504e-11
+        }
+      ],
+      "predictability": {
+        "persistence": 0.9999991031055094,
+        "planted_topk_recall": 1.0
+      }
+    },
+    "oracle": {
+      "method": "oracle",
+      "final_mse": 2.084685356740397e-12,
+      "alloc": {
+        "blocks.0.proj": 3,
+        "blocks.1.proj": 3,
+        "blocks.2.proj": 0,
+        "blocks.3.proj": 0,
+        "blocks.4.proj": 0,
+        "blocks.5.proj": 0,
+        "blocks.6.proj": 0,
+        "blocks.7.proj": 0
+      },
+      "budget_on_planted": 1.0,
+      "curve": [
+        [
+          100,
+          2.9069801485093194e-05
+        ],
+        [
+          200,
+          9.239483067524645e-09
+        ],
+        [
+          300,
+          1.3237018252343358e-11
+        ],
+        [
+          400,
+          8.804433402367874e-14
+        ],
+        [
+          500,
+          1.7079041956732932e-11
+        ],
+        [
+          600,
+          1.1718656378612025e-08
+        ],
+        [
+          700,
+          5.947255361793413e-11
+        ],
+        [
+          800,
+          2.084685370292924e-12
+        ]
+      ],
+      "goodput_log": []
+    }
+  }
+}

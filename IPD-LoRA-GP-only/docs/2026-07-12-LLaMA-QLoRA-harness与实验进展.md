@@ -10,7 +10,7 @@
 - **路线变更**：DeBERTa+GLUE 上四方法（lora/gora/adalora/goodput）准确率打平、goodput 信号弱、秩饱和（详见 7.8 文档），据此正式切换到 **路线 A**：LLaMA-3.1-8B + QLoRA(4-bit) + 更难任务（commonsense / gsm8k），验证动态秩分配在"未饱和"场景是否有价值。
 - **代码改进**：改造 `ipd_lora.py` 使自研 `IPDLoRALinear` 能包裹 `bitsandbytes` 的 4-bit 量化线性层，并新增 LLaMA 命名模式；**在完全不改变 DeBERTa 全精度路径行为的前提下**新增了一整套 causal-LM harness（`causal_data.py` / `train_causal.py` / `train_adalora_causal.py` + 三个编排脚本），四方法与 DeBERTa 侧共享分配逻辑、goodput 打分、日志/结果 schema。
 - **Bug 修复**：修复 6 个真实问题，其中 2 个是 QLoRA 特有的 gora 兼容性问题（4-bit 权重不可求导、importance pass 显存 OOM）。
-- **实验结果（已完成，单 seed）**：commonsense overall 上 goodput=68.5% 看似低于 lora/gora/adalora（72.0–72.7%），但**排查发现此差距几乎全来自 winogrande 子任务的模型退化**（全方法恒输出 `option1`，goodput=0.18/lora=0.39，非抽取 bug）。**剔除退化的 winogrande 后四方法持平**（goodput=75.75%＝gora，lora=76.75%，adalora=75.04%）；gsm8k 上四方法亦落在 62.2–65.4%。**结论：LLaMA 上四方法无稳健差异（null），与 GLUE 一致，支持路线 C（适用边界/负结果）**。E4 分析给出机制：commonsense 的 goodput 信号虽有横截面 spread（entropy 0.657）却**无时间持续性、且负预测未来增益**（persist@lag1≈0、predict@lag1=−0.18），故在线重分配无从获益。详见 §6。
+- **实验结果（已完成，3 seed）**：commonsense **excl-wino** 上 lora 76.88±0.32 / gora 76.74±0.70 / goodput 76.55±0.61 / adalora 74.58±0.33——前三者完全重叠，**null result 稳健确认**。overall 差距几乎全来自 winogrande 退化（恒输出 option1，非抽取 bug；goodput wino 尤不稳定 7±8）。gsm8k 单 seed 四方法落在 62.2–65.4%。E4：信号有 spread 但无时间可预测性（persist≈0、predict=−0.18）。与 A.1/A.2 positive control 双向闭合，支持 **F1（判据优先）**。详见 §6。
 
 ---
 
@@ -169,18 +169,18 @@ bf16 + 4bit nf4；batch 8 × 累积 2；1 epoch；LR 2e-4（adalora 3e-4）；�
 
 ### 6.3 定量结果（真实，读自 `outputs_causal/*/summary.csv`）
 
-**commonsense（准确率 %，单 seed）**
+**commonsense（准确率 %，3 seed：42/43/44）**
 
-> **主指标 = excl-wino**。winogrande 全方法退化为常数策略（恒输出 `option1`，全 <0.5 随机基线），不具区分性，已从主指标剔除（排查见 §6.4，`~wino` 列仅作记录）。
+> **主指标 = excl-wino**。winogrande 全方法退化为常数策略（恒输出 `option1`），不具区分性，已从主指标剔除（排查见 §6.4）。
 
-| 方法 | **excl-wino** | overall | arc_c | arc_e | boolq | hella | obqa | piqa | siqa | ~wino | wall(s) | rank-steps |
-|------|---------------|---------|-------|-------|-------|-------|------|------|------|-------|---------|-----------|
-| lora | **76.75** | 72.03 | .783 | .890 | .750 | .760 | .783 | .890 | .517 | .390 | 6540 | 6.72e6 |
-| gora | **75.75** | 72.11 | .799 | .880 | .707 | .730 | .773 | .890 | .523 | .467 | 6908 | 6.72e6 |
-| adalora | **75.04** | 72.70 | .793 | .883 | .710 | .717 | .777 | .890 | .483 | .563 | 7187 | 1.20e7 |
-| goodput | **75.75** | 68.53 | .789 | .887 | .737 | .733 | .750 | .890 | .517 | ~.180 | 6492 | 6.72e6 |
+| 方法 | **excl-wino** | overall | ~wino | wall(s) | rank-steps |
+|------|---------------|---------|-------|---------|-----------|
+| lora | **76.88±0.32** | 70.25±1.58 | 23.9±12.0 | 6508 | 6.72e6 |
+| gora | **76.74±0.70** | 70.78±1.57 | 29.1±16.3 | 6890 | 6.72e6 |
+| goodput | **76.55±0.61** | 67.85±0.60 | 7.0±7.9 | 6455 | 6.72e6 |
+| adalora | **74.58±0.33** | 71.93±0.55 | 53.4±2.1 | 7201 | 1.20e7 |
 
-以 excl-wino 为主指标：四方法落在 **75.0–76.8%**（互相 ≤1.7pp，单 seed 噪声内）→ **无稳健差异**。
+→ lora / gora / goodput **完全重叠**（差 ≤0.3pp，远小于 std）；adalora 略低 ~2pp 但参数量约 2×。**null result 在 3 seed 下稳健确认**。
 
 **gsm8k（准确率 %，单 seed，eval 子集 500）**
 
@@ -218,19 +218,21 @@ bf16 + 4bit nf4；batch 8 × 累积 2；1 epoch；LR 2e-4（adalora 3e-4）；�
 
 −3.5pp 的差距**几乎全部来自 winogrande 崩溃**；排除后 goodput=75.75 与 gora 持平、高于 adalora、仅低于 lora 约 1pp（单 seed 噪声内）。
 
-### 6.5 结论（修正后）
+### 6.5 结论（3 seed 确认）
 
-- **四方法在 LLaMA 上无稳健差异**：排除退化的 winogrande 后，commonsense 四方法落在 75.0–76.8% 区间（互相 ≤1.7pp）；gsm8k 落在 62.2–65.4%。这与 DeBERTa+GLUE 的 **null result 一致**——动态秩分配在 LLaMA 未饱和场景下同样**未带来稳健收益**。
-- **机制解释（可发表洞见）**：E4 显示 commonsense 的 module goodput 信号虽有横截面 spread（entropy 0.657、CV 3.03），但**无时间持续性（persist@lag1≈0）、对未来增益负预测（predict@lag1=−0.18）**。信号不可预测 → 在线重分配无从获益；这与 DeBERTa 上"信号近均匀"是同一结论的两种表现。
-- **单点观察（弱、待验证）**：goodput 在 winogrande 上退化更重（0.18），可能暗示动态分配在高歧义任务上放大退化，但单 seed、单任务，不足以断言。
-- **路线判定**：进一步支持 **路线 C（适用边界 / 负结果）**——"动态秩分配的收益取决于分配信号的时间可预测性；GLUE（饱和/均匀）与 commonsense/gsm8k（spread 但不可预测）均无收益"，与 GLUE 结果合并为一篇边界研究。
+- **四方法在 LLaMA 上无稳健差异**：excl-wino 下 lora/gora/goodput 差 ≤0.3pp（远小于 std）；adalora 略低但参数约 2×。与 DeBERTa+GLUE 的 null 一致。
+- **机制**：E4 显示信号有 spread 但无时间可预测性 → 在线重分配无从获益；A.1/A.2 证明当信号可预测时动态分配确实赢 → 判据双向闭合。
+- **winogrande**：退化 artifact（多 seed 下方差极大），主指标已剔除；goodput 在该子任务上尤不稳定（7±8），可作弱观察写入讨论。
 
 ### 6.6 待办
 
-- [ ] winogrande 常数策略成因（prompt 位置偏好 / 训练目标类别不均 / 训练不足）——可换 prompt 或延长训练验证；或直接在报告中剔除该子任务。
-- [ ] 有效秩利用率（`effective_rank.py`）四方法对比（8B 全 SVD 慢）。
-- [ ] 多 seed（≥3）复跑确认 excl-wino 的 ≤1.7pp 差异确在噪声内。
-- [ ] 整理路线 C 论文骨架。
+- [x] winogrande 排查 + excl-wino 主指标
+- [x] 多 seed（≥3）确认 null
+- [x] A.1 / A.2 positive control（F1 C4）
+- [ ] 有效秩利用率（`effective_rank.py`）四方法对比（可选）
+- [ ] 强 baseline 对齐（堵审稿「你没调好」）
+- [ ] 按 F1 骨架开写 Intro / Related
+
 
 ---
 

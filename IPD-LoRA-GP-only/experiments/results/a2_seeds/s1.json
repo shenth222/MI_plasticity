@@ -1,0 +1,571 @@
+{
+  "summary": {
+    "config": {
+      "n_layers": 4,
+      "dim": 128,
+      "planted_rank": 4,
+      "n_planted": 2,
+      "max_rank": 4,
+      "budget": 10,
+      "r_min": 1,
+      "alpha": 4,
+      "n_train": 4096,
+      "n_eval": 1024,
+      "bs": 128,
+      "steps": 1600,
+      "lr": 0.01,
+      "gp_interval": 40,
+      "gp_eval_batches": 2,
+      "gora_batches": 8,
+      "planted_scale": 1.0,
+      "seed": 1,
+      "methods": [
+        "uniform",
+        "gora",
+        "goodput",
+        "oracle_switch"
+      ],
+      "out": "experiments/results/a2_seeds/s1.json"
+    },
+    "names_a": [
+      "blocks.0.proj",
+      "blocks.1.proj"
+    ],
+    "names_b": [
+      "blocks.2.proj",
+      "blocks.3.proj"
+    ],
+    "mse_phase1": {
+      "uniform": 0.38071516528725624,
+      "gora": 0.33055898547172546,
+      "goodput": 0.43062740564346313,
+      "oracle_switch": 0.4702364206314087
+    },
+    "mse_phase2": {
+      "uniform": 0.09761444944888353,
+      "gora": 0.1506616324186325,
+      "goodput": 0.04519149987027049,
+      "oracle_switch": 7.569131170725996e-07
+    },
+    "mse_avg": {
+      "uniform": 0.2391648073680699,
+      "gora": 0.24061030894517899,
+      "goodput": 0.2379094527568668,
+      "oracle_switch": 0.23511858877226288
+    },
+    "final_budget_a": {
+      "uniform": 0.5,
+      "gora": 0.8,
+      "goodput": 0.4,
+      "oracle_switch": 0.2
+    },
+    "final_budget_b": {
+      "uniform": 0.5,
+      "gora": 0.2,
+      "goodput": 0.6,
+      "oracle_switch": 0.8
+    },
+    "phase2_ratio_gora_over_goodput": 3.333848906345908,
+    "goodput_migrated": true
+  },
+  "results": {
+    "uniform": {
+      "method": "uniform",
+      "mse_phase1": 0.38071516528725624,
+      "mse_phase2": 0.09761444944888353,
+      "mse_avg": 0.2391648073680699,
+      "mid_budget_a": 0.5,
+      "mid_budget_b": 0.5,
+      "final_budget_a": 0.5,
+      "final_budget_b": 0.5,
+      "alloc": {
+        "blocks.0.proj": 2,
+        "blocks.1.proj": 2,
+        "blocks.2.proj": 2,
+        "blocks.3.proj": 2
+      },
+      "alloc_log": []
+    },
+    "gora": {
+      "method": "gora",
+      "mse_phase1": 0.33055898547172546,
+      "mse_phase2": 0.1506616324186325,
+      "mse_avg": 0.24061030894517899,
+      "mid_budget_a": 0.8,
+      "mid_budget_b": 0.2,
+      "final_budget_a": 0.8,
+      "final_budget_b": 0.2,
+      "alloc": {
+        "blocks.0.proj": 4,
+        "blocks.1.proj": 4,
+        "blocks.2.proj": 1,
+        "blocks.3.proj": 1
+      },
+      "alloc_log": []
+    },
+    "goodput": {
+      "method": "goodput",
+      "mse_phase1": 0.43062740564346313,
+      "mse_phase2": 0.04519149987027049,
+      "mse_avg": 0.2379094527568668,
+      "mid_budget_a": 0.8,
+      "mid_budget_b": 0.2,
+      "final_budget_a": 0.4,
+      "final_budget_b": 0.6,
+      "alloc": {
+        "blocks.0.proj": 1,
+        "blocks.1.proj": 3,
+        "blocks.2.proj": 3,
+        "blocks.3.proj": 3
+      },
+      "alloc_log": [
+        {
+          "step": 40,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 80,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 120,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 160,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 200,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 240,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 280,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 320,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 360,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 400,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 440,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 480,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 520,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 560,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 600,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 640,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 680,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 720,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 760,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 800,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 840,
+          "budget_a": 0.8,
+          "budget_b": 0.2,
+          "alloc": {
+            "blocks.0.proj": 4,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 880,
+          "budget_a": 0.7,
+          "budget_b": 0.3,
+          "alloc": {
+            "blocks.0.proj": 3,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 2
+          }
+        },
+        {
+          "step": 920,
+          "budget_a": 0.7,
+          "budget_b": 0.3,
+          "alloc": {
+            "blocks.0.proj": 3,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 2
+          }
+        },
+        {
+          "step": 960,
+          "budget_a": 0.7,
+          "budget_b": 0.3,
+          "alloc": {
+            "blocks.0.proj": 3,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 2,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 1000,
+          "budget_a": 0.7,
+          "budget_b": 0.3,
+          "alloc": {
+            "blocks.0.proj": 3,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 2
+          }
+        },
+        {
+          "step": 1040,
+          "budget_a": 0.7,
+          "budget_b": 0.3,
+          "alloc": {
+            "blocks.0.proj": 3,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 2
+          }
+        },
+        {
+          "step": 1080,
+          "budget_a": 0.7,
+          "budget_b": 0.3,
+          "alloc": {
+            "blocks.0.proj": 3,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 2,
+            "blocks.3.proj": 1
+          }
+        },
+        {
+          "step": 1120,
+          "budget_a": 0.6,
+          "budget_b": 0.4,
+          "alloc": {
+            "blocks.0.proj": 2,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 1,
+            "blocks.3.proj": 3
+          }
+        },
+        {
+          "step": 1160,
+          "budget_a": 0.5,
+          "budget_b": 0.5,
+          "alloc": {
+            "blocks.0.proj": 1,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 2,
+            "blocks.3.proj": 3
+          }
+        },
+        {
+          "step": 1200,
+          "budget_a": 0.5,
+          "budget_b": 0.5,
+          "alloc": {
+            "blocks.0.proj": 1,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 2,
+            "blocks.3.proj": 3
+          }
+        },
+        {
+          "step": 1240,
+          "budget_a": 0.5,
+          "budget_b": 0.5,
+          "alloc": {
+            "blocks.0.proj": 1,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 2,
+            "blocks.3.proj": 3
+          }
+        },
+        {
+          "step": 1280,
+          "budget_a": 0.5,
+          "budget_b": 0.5,
+          "alloc": {
+            "blocks.0.proj": 1,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 2,
+            "blocks.3.proj": 3
+          }
+        },
+        {
+          "step": 1320,
+          "budget_a": 0.5,
+          "budget_b": 0.5,
+          "alloc": {
+            "blocks.0.proj": 1,
+            "blocks.1.proj": 4,
+            "blocks.2.proj": 2,
+            "blocks.3.proj": 3
+          }
+        },
+        {
+          "step": 1360,
+          "budget_a": 0.4,
+          "budget_b": 0.6,
+          "alloc": {
+            "blocks.0.proj": 1,
+            "blocks.1.proj": 3,
+            "blocks.2.proj": 3,
+            "blocks.3.proj": 3
+          }
+        },
+        {
+          "step": 1400,
+          "budget_a": 0.4,
+          "budget_b": 0.6,
+          "alloc": {
+            "blocks.0.proj": 1,
+            "blocks.1.proj": 3,
+            "blocks.2.proj": 3,
+            "blocks.3.proj": 3
+          }
+        },
+        {
+          "step": 1440,
+          "budget_a": 0.4,
+          "budget_b": 0.6,
+          "alloc": {
+            "blocks.0.proj": 1,
+            "blocks.1.proj": 3,
+            "blocks.2.proj": 3,
+            "blocks.3.proj": 3
+          }
+        },
+        {
+          "step": 1480,
+          "budget_a": 0.4,
+          "budget_b": 0.6,
+          "alloc": {
+            "blocks.0.proj": 1,
+            "blocks.1.proj": 3,
+            "blocks.2.proj": 3,
+            "blocks.3.proj": 3
+          }
+        },
+        {
+          "step": 1520,
+          "budget_a": 0.4,
+          "budget_b": 0.6,
+          "alloc": {
+            "blocks.0.proj": 1,
+            "blocks.1.proj": 3,
+            "blocks.2.proj": 3,
+            "blocks.3.proj": 3
+          }
+        },
+        {
+          "step": 1560,
+          "budget_a": 0.4,
+          "budget_b": 0.6,
+          "alloc": {
+            "blocks.0.proj": 1,
+            "blocks.1.proj": 3,
+            "blocks.2.proj": 3,
+            "blocks.3.proj": 3
+          }
+        }
+      ]
+    },
+    "oracle_switch": {
+      "method": "oracle_switch",
+      "mse_phase1": 0.4702364206314087,
+      "mse_phase2": 7.569131170725996e-07,
+      "mse_avg": 0.23511858877226288,
+      "mid_budget_a": 0.8,
+      "mid_budget_b": 0.2,
+      "final_budget_a": 0.2,
+      "final_budget_b": 0.8,
+      "alloc": {
+        "blocks.0.proj": 1,
+        "blocks.1.proj": 1,
+        "blocks.2.proj": 4,
+        "blocks.3.proj": 4
+      },
+      "alloc_log": []
+    }
+  }
+}

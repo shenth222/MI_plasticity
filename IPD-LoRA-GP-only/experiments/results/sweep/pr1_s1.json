@@ -1,0 +1,414 @@
+{
+  "summary": {
+    "config": {
+      "n_layers": 8,
+      "dim": 128,
+      "planted_rank": 1,
+      "n_planted": 2,
+      "max_rank": 8,
+      "budget": 16,
+      "alpha": 8,
+      "n_train": 4096,
+      "n_eval": 1024,
+      "bs": 128,
+      "steps": 800,
+      "lr": 0.01,
+      "eval_every": 100,
+      "gp_interval": 50,
+      "gp_eval_batches": 2,
+      "gora_batches": 8,
+      "planted_scale": 1.0,
+      "seed": 1,
+      "methods": [
+        "uniform",
+        "gora",
+        "goodput",
+        "oracle"
+      ],
+      "out": "experiments/results/sweep/pr1_s1.json"
+    },
+    "planted_names": [
+      "blocks.0.proj",
+      "blocks.1.proj"
+    ],
+    "final_mse": {
+      "uniform": 9.192918355438451e-07,
+      "gora": 1.9477766777242778e-07,
+      "goodput": 1.1964202695224913e-07,
+      "oracle": 3.26948885742695e-07
+    },
+    "budget_on_planted": {
+      "uniform": 0.25,
+      "gora": 1.0,
+      "goodput": 0.8125,
+      "oracle": 1.0
+    },
+    "mse_ratio_to_uniform": {
+      "uniform": 1.0,
+      "gora": 0.21187794804812882,
+      "goodput": 0.13014586046167803,
+      "oracle": 0.35565298537572115
+    },
+    "goodput_predictability": {
+      "persistence": 0.9999944759708945,
+      "planted_topk_recall": 1.0
+    }
+  },
+  "results": {
+    "uniform": {
+      "method": "uniform",
+      "final_mse": 9.192918355438451e-07,
+      "alloc": {
+        "blocks.0.proj": 2,
+        "blocks.1.proj": 2,
+        "blocks.2.proj": 2,
+        "blocks.3.proj": 2,
+        "blocks.4.proj": 2,
+        "blocks.5.proj": 2,
+        "blocks.6.proj": 2,
+        "blocks.7.proj": 2
+      },
+      "budget_on_planted": 0.25,
+      "curve": [
+        [
+          100,
+          1.5082270010680077e-05
+        ],
+        [
+          200,
+          2.9095696696401774e-07
+        ],
+        [
+          300,
+          5.578665307481856e-08
+        ],
+        [
+          400,
+          1.8549652258670335e-08
+        ],
+        [
+          500,
+          1.0560560870231939e-07
+        ],
+        [
+          600,
+          4.9799445900333694e-08
+        ],
+        [
+          700,
+          9.592102045985484e-07
+        ],
+        [
+          800,
+          9.192918355438451e-07
+        ]
+      ],
+      "goodput_log": []
+    },
+    "gora": {
+      "method": "gora",
+      "final_mse": 1.9477766777242778e-07,
+      "alloc": {
+        "blocks.0.proj": 8,
+        "blocks.1.proj": 8,
+        "blocks.2.proj": 0,
+        "blocks.3.proj": 0,
+        "blocks.4.proj": 0,
+        "blocks.5.proj": 0,
+        "blocks.6.proj": 0,
+        "blocks.7.proj": 0
+      },
+      "budget_on_planted": 1.0,
+      "curve": [
+        [
+          100,
+          2.430383824503224e-05
+        ],
+        [
+          200,
+          6.963205834153996e-07
+        ],
+        [
+          300,
+          2.311000439902955e-07
+        ],
+        [
+          400,
+          2.800920793077921e-07
+        ],
+        [
+          500,
+          6.730343500294111e-07
+        ],
+        [
+          600,
+          7.275001934203829e-08
+        ],
+        [
+          700,
+          7.256606759931117e-09
+        ],
+        [
+          800,
+          1.9477766599607094e-07
+        ]
+      ],
+      "goodput_log": []
+    },
+    "goodput": {
+      "method": "goodput",
+      "final_mse": 1.1964202695224913e-07,
+      "alloc": {
+        "blocks.0.proj": 8,
+        "blocks.1.proj": 5,
+        "blocks.2.proj": 1,
+        "blocks.3.proj": 0,
+        "blocks.4.proj": 0,
+        "blocks.5.proj": 1,
+        "blocks.6.proj": 0,
+        "blocks.7.proj": 1
+      },
+      "budget_on_planted": 0.8125,
+      "curve": [
+        [
+          100,
+          0.00034488853634684347
+        ],
+        [
+          200,
+          4.229202772876306e-06
+        ],
+        [
+          300,
+          1.202887602858027e-06
+        ],
+        [
+          400,
+          4.1524663529912686e-07
+        ],
+        [
+          500,
+          1.6161202864850566e-07
+        ],
+        [
+          600,
+          8.352058067373491e-08
+        ],
+        [
+          700,
+          3.2856849685458656e-07
+        ],
+        [
+          800,
+          1.1964202695224913e-07
+        ]
+      ],
+      "goodput_log": [
+        {
+          "blocks.0.proj": 3.1355011742562046e-08,
+          "blocks.1.proj": 1.2533564586192367e-08,
+          "blocks.2.proj": 1.4551915228366849e-12,
+          "blocks.3.proj": -1.4551915228366849e-12,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 1.4551915228366849e-12,
+          "blocks.6.proj": 1.4551915228366849e-12,
+          "blocks.7.proj": 2.9103830456733697e-12
+        },
+        {
+          "blocks.0.proj": 2.871045580832287e-08,
+          "blocks.1.proj": 1.1855299817398188e-08,
+          "blocks.2.proj": 2.764863893389701e-12,
+          "blocks.3.proj": -1.3096723705530164e-12,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 2.764863893389701e-12,
+          "blocks.6.proj": 1.3096723705530164e-12,
+          "blocks.7.proj": 4.074536263942717e-12
+        },
+        {
+          "blocks.0.proj": 2.5853183387880555e-08,
+          "blocks.1.proj": 1.067633638740517e-08,
+          "blocks.2.proj": 2.579326974228024e-12,
+          "blocks.3.proj": -1.1787051334977148e-12,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 2.579326974228024e-12,
+          "blocks.6.proj": 1.1787051334977148e-12,
+          "blocks.7.proj": 3.758032107725738e-12
+        },
+        {
+          "blocks.0.proj": 2.3268305585588673e-08,
+          "blocks.1.proj": 9.608852815290446e-09,
+          "blocks.2.proj": 2.2986569092608985e-12,
+          "blocks.3.proj": -1.0608346201479434e-12,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 2.2986569092608985e-12,
+          "blocks.6.proj": 1.0608346201479434e-12,
+          "blocks.7.proj": 3.3367541618645184e-12
+        },
+        {
+          "blocks.0.proj": 2.0941718032645437e-08,
+          "blocks.1.proj": 8.647994818602456e-09,
+          "blocks.2.proj": 2.068791218334809e-12,
+          "blocks.3.proj": -9.547511581331492e-13,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 2.068791218334809e-12,
+          "blocks.6.proj": 9.547511581331492e-13,
+          "blocks.7.proj": 2.997394403791986e-12
+        },
+        {
+          "blocks.0.proj": 1.8847673416530595e-08,
+          "blocks.1.proj": 7.783194768308021e-09,
+          "blocks.2.proj": 1.8619120965013282e-12,
+          "blocks.3.proj": -8.592760423198343e-13,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 1.8619120965013282e-12,
+          "blocks.6.proj": 8.592760423198343e-13,
+          "blocks.7.proj": 2.6976549634127873e-12
+        },
+        {
+          "blocks.0.proj": 1.69629540365122e-08,
+          "blocks.1.proj": 7.004877565213973e-09,
+          "blocks.2.proj": 1.6757208868511955e-12,
+          "blocks.3.proj": -7.733484380878509e-13,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 1.678563057794236e-12,
+          "blocks.6.proj": 7.733484380878509e-13,
+          "blocks.7.proj": 2.430731638014549e-12
+        },
+        {
+          "blocks.0.proj": 1.5266709436666584e-08,
+          "blocks.1.proj": 6.304392650863519e-09,
+          "blocks.2.proj": 1.506727712694556e-12,
+          "blocks.3.proj": -6.960135942790658e-13,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 1.5092856665432922e-12,
+          "blocks.6.proj": 6.960135942790658e-13,
+          "blocks.7.proj": 2.1876584742130943e-12
+        },
+        {
+          "blocks.0.proj": 1.3740123225221166e-08,
+          "blocks.1.proj": 5.673953385777167e-09,
+          "blocks.2.proj": 1.3546338559535802e-12,
+          "blocks.3.proj": -6.264122348511593e-13,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 1.358357099888963e-12,
+          "blocks.6.proj": 6.264122348511593e-13,
+          "blocks.7.proj": 1.968892626791785e-12
+        },
+        {
+          "blocks.0.proj": 1.2366129643263705e-08,
+          "blocks.1.proj": 5.1065580471994506e-09,
+          "blocks.2.proj": 1.2184599276224622e-12,
+          "blocks.3.proj": -5.637710113660434e-13,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 1.2218108471643066e-12,
+          "blocks.6.proj": 5.637710113660434e-13,
+          "blocks.7.proj": 1.7712928213768466e-12
+        },
+        {
+          "blocks.0.proj": 1.1129526937398082e-08,
+          "blocks.1.proj": 4.595902171425232e-09,
+          "blocks.2.proj": 1.0962586634923359e-12,
+          "blocks.3.proj": -5.073939102294391e-13,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 1.0992744910799959e-12,
+          "blocks.6.proj": 5.073939102294391e-13,
+          "blocks.7.proj": 1.5938082678712818e-12
+        },
+        {
+          "blocks.0.proj": 1.0016650182913159e-08,
+          "blocks.1.proj": 4.136311954282709e-09,
+          "blocks.2.proj": 9.862775257752222e-13,
+          "blocks.3.proj": -4.566545192064952e-13,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 9.889917706041163e-13,
+          "blocks.6.proj": 4.566545192064952e-13,
+          "blocks.7.proj": 1.4344274410841537e-12
+        },
+        {
+          "blocks.0.proj": 9.015266095455995e-09,
+          "blocks.1.proj": 3.7226806167458914e-09,
+          "blocks.2.proj": 8.876497731977e-13,
+          "blocks.3.proj": -4.109890672858457e-13,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 8.893820508079446e-13,
+          "blocks.6.proj": 4.109890672858457e-13,
+          "blocks.7.proj": 1.2902741542399783e-12
+        },
+        {
+          "blocks.0.proj": 8.114419830579885e-09,
+          "blocks.1.proj": 3.350412270854208e-09,
+          "blocks.2.proj": 7.9888479587793e-13,
+          "blocks.3.proj": -3.6989016055726116e-13,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 8.004438457271502e-13,
+          "blocks.6.proj": 3.6989016055726116e-13,
+          "blocks.7.proj": 1.1612467388159804e-12
+        },
+        {
+          "blocks.0.proj": 7.303337470964033e-09,
+          "blocks.1.proj": 3.0153730332884476e-09,
+          "blocks.2.proj": 7.19706859025897e-13,
+          "blocks.3.proj": -3.3290114450153507e-13,
+          "blocks.4.proj": 0.0,
+          "blocks.5.proj": 7.211100038901952e-13,
+          "blocks.6.proj": 3.3290114450153507e-13,
+          "blocks.7.proj": 1.0458326076701424e-12
+        }
+      ],
+      "predictability": {
+        "persistence": 0.9999944759708945,
+        "planted_topk_recall": 1.0
+      }
+    },
+    "oracle": {
+      "method": "oracle",
+      "final_mse": 3.26948885742695e-07,
+      "alloc": {
+        "blocks.0.proj": 1,
+        "blocks.1.proj": 1,
+        "blocks.2.proj": 0,
+        "blocks.3.proj": 0,
+        "blocks.4.proj": 0,
+        "blocks.5.proj": 0,
+        "blocks.6.proj": 0,
+        "blocks.7.proj": 0
+      },
+      "budget_on_planted": 1.0,
+      "curve": [
+        [
+          100,
+          1.2102521282031375e-05
+        ],
+        [
+          200,
+          5.428378857530447e-09
+        ],
+        [
+          300,
+          1.9255245869986837e-09
+        ],
+        [
+          400,
+          8.012930596823509e-09
+        ],
+        [
+          500,
+          1.9944831786133932e-08
+        ],
+        [
+          600,
+          1.061103290567189e-06
+        ],
+        [
+          700,
+          1.813861061350508e-07
+        ],
+        [
+          800,
+          3.26948885742695e-07
+        ]
+      ],
+      "goodput_log": []
+    }
+  }
+}
